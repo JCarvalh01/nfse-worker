@@ -1,4 +1,6 @@
-import { chromium } from "playwright";
+process.env.PLAYWRIGHT_BROWSERS_PATH = "0";
+
+const { chromium } = await import("playwright");
 
 const TIMEOUT_CURTO = 8000;
 const TIMEOUT_MEDIO = 15000;
@@ -1196,6 +1198,7 @@ export async function emitirNfseViaAutomacao(input) {
         String(process.env.PLAYWRIGHT_HEADLESS || "true").toLowerCase() === "true";
 
       console.log("PLAYWRIGHT_HEADLESS:", process.env.PLAYWRIGHT_HEADLESS);
+      console.log("PLAYWRIGHT_BROWSERS_PATH:", process.env.PLAYWRIGHT_BROWSERS_PATH);
       console.log("Executando navegador em modo headless:", headless);
 
       browser = await chromium.launch({
