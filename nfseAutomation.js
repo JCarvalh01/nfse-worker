@@ -1,5 +1,11 @@
 import { chromium } from "playwright";
 
+const TIMEOUT_CURTO = 8000;
+const TIMEOUT_MEDIO = 15000;
+const TIMEOUT_LONGO = 35000;
+const TIMEOUT_MUITO_LONGO = 60000;
+const TIMEOUT_EMISSAO_FINAL = 120000;
+
 function limparDocumento(valor) {
   return String(valor || "").replace(/\D/g, "");
 }
@@ -47,7 +53,6 @@ function formatarValorParaDigitacaoNoPortal(valor) {
     if (!Number.isFinite(valor)) {
       throw new Error(`Valor do serviço inválido: ${valor}`);
     }
-
     return valor.toFixed(2).replace(".", ",");
   }
 
@@ -99,9 +104,64 @@ function erroEhTransitorio(erro) {
     "a tela pessoas não foi identificada",
     "nenhuma opção de município apareceu",
     "nenhuma opção apareceu para o código de tributação",
+    "não encontrei botão",
+    "a emissão não foi confirmada na tela final",
   ];
 
   return errosTransitorios.some((trecho) => msg.includes(trecho));
+}
+
+async function esperarRedeEstabilizar(page, atraso = 800) {
+  await page.waitForLoadState("domcontentloaded").catch(() => null);
+  await page.waitForLoadState("networkidle").catch(() => null);
+  await page.waitForTimeout(atraso);
+}
+
+async function esperarPaginaPronta(page, nomeEtapa, atraso = 900) {
+  console.log(`Aguardando estabilização da etapa: ${nomeEtapa}`);
+  await esperarRedeEstabilizar(page, atraso);
+}
+
+async function aguardarComTentativas(
+  fn,
+  tentativas = 3,
+  esperaMs = 700,
+  nome = "operação"
+) {
+  let ultimoErro = null;
+
+  for (let i = 1; i <= tentativas; i++) {
+    try {
+      return await fn();
+    } catch (error) {
+      ultimoErro = error;
+      console.log(`Falha na ${nome} - tentativa ${i}/${tentativas}:`, error);
+      if (i < tentativas) {
+        await new Promise((resolve) => setTimeout(resolve, esperaMs));
+      }
+    }
+  }
+
+  throw ultimoErro instanceof Error
+    ? ultimoErro
+    : new Error(`Falha ao executar ${nome}.`);
+}
+
+async function obterLocatorVisivel(page, selectors, timeout = TIMEOUT_MEDIO) {
+  for (const selector of selectors) {
+    try {
+      const locator = page.locator(selector).first();
+      const count = await locator.count().catch(() => 0);
+      if (!count) continue;
+
+      await locator.waitFor({ state: "visible", timeout });
+      return locator;
+    } catch {
+      // tenta próximo
+    }
+  }
+
+  return null;
 }
 
 async function preencherCampoComFallback(page, selectors, valor, nomeCampo) {
@@ -111,15 +171,25 @@ async function preencherCampoComFallback(page, selectors, valor, nomeCampo) {
       const count = await locator.count();
       if (!count) continue;
 
-      await locator.waitFor({ state: "visible", timeout: 3500 });
-      await locator.click({ timeout: 3500 });
+      await locator.waitFor({ state: "visible", timeout: TIMEOUT_LONGO });
+      await locator.scrollIntoViewIfNeeded().catch(() => null);
+      await locator.click({ timeout: TIMEOUT_MEDIO });
+      await page.waitForTimeout(150);
+
       await locator.press("Control+A").catch(() => null);
       await locator.press("Meta+A").catch(() => null);
-      await locator.fill("");
-      await locator.type(valor, { delay: 30 });
+      await locator.fill("").catch(() => null);
+      await page.waitForTimeout(120);
+
+      await locator.type(valor, { delay: 35 });
 
       const valorAtual = await locator.inputValue().catch(() => "");
       console.log(`Campo ${nomeCampo} preenchido com seletor ${selector}:`, valorAtual);
+
+      if (!String(valorAtual || "").trim()) {
+        await locator.fill(valor).catch(() => null);
+      }
+
       return;
     } catch {
       // tenta próximo
@@ -136,8 +206,10 @@ async function clicarComFallback(page, selectors, nome) {
       const count = await locator.count();
       if (!count) continue;
 
-      await locator.waitFor({ state: "visible", timeout: 3500 });
-      await locator.click({ timeout: 3500 });
+      await locator.waitFor({ state: "visible", timeout: TIMEOUT_LONGO });
+      await locator.scrollIntoViewIfNeeded().catch(() => null);
+      await page.waitForTimeout(150);
+      await locator.click({ timeout: TIMEOUT_MEDIO, force: true });
       console.log(`Clique realizado em ${nome} com seletor: ${selector}`);
       return;
     } catch {
@@ -158,7 +230,8 @@ async function clicarSeExistir(page, selectors, nome) {
       const visivel = await locator.isVisible().catch(() => false);
       if (!visivel) continue;
 
-      await locator.click({ timeout: 2500 });
+      await locator.scrollIntoViewIfNeeded().catch(() => null);
+      await locator.click({ timeout: TIMEOUT_CURTO, force: true });
       console.log(`Clique opcional em ${nome} com seletor: ${selector}`);
       return true;
     } catch {
@@ -170,16 +243,29 @@ async function clicarSeExistir(page, selectors, nome) {
   return false;
 }
 
-async function esperarQualquerUm(page, selectors, timeout = 5000) {
-  for (const selector of selectors) {
-    try {
-      await page.locator(selector).first().waitFor({ state: "visible", timeout });
-      console.log("Elemento identificado:", selector);
-      return selector;
-    } catch {
-      // tenta próximo
+async function esperarQualquerUm(page, selectors, timeout = TIMEOUT_MEDIO) {
+  const inicio = Date.now();
+
+  while (Date.now() - inicio < timeout) {
+    for (const selector of selectors) {
+      try {
+        const locator = page.locator(selector).first();
+        const count = await locator.count().catch(() => 0);
+        if (!count) continue;
+
+        const visivel = await locator.isVisible().catch(() => false);
+        if (!visivel) continue;
+
+        console.log("Elemento identificado:", selector);
+        return selector;
+      } catch {
+        // tenta próximo
+      }
     }
+
+    await page.waitForTimeout(300);
   }
+
   return null;
 }
 
@@ -197,25 +283,45 @@ async function obterInputSelect2Visivel(page) {
 }
 
 async function abrirSelect2ECapturarBusca(page, campo, nomeCampo) {
-  for (let tentativa = 1; tentativa <= 3; tentativa++) {
+  for (let tentativa = 1; tentativa <= 5; tentativa++) {
     await campo.scrollIntoViewIfNeeded().catch(() => null);
-    await campo.click({ force: true, timeout: 3500 });
-    await page.waitForTimeout(220);
+    await page.waitForTimeout(150);
+    await campo.click({ force: true, timeout: TIMEOUT_MEDIO }).catch(() => null);
+    await page.waitForTimeout(450);
 
     const inputBusca = await obterInputSelect2Visivel(page);
     if (inputBusca) {
-      await inputBusca.waitFor({ state: "visible", timeout: 5000 });
+      await inputBusca.waitFor({ state: "visible", timeout: TIMEOUT_MEDIO });
       return inputBusca;
     }
 
     console.log(
       `Tentativa ${tentativa} sem input Select2 visível em ${nomeCampo}. Reabrindo...`
     );
+
     await page.keyboard.press("Escape").catch(() => null);
-    await page.waitForTimeout(180);
+    await page.waitForTimeout(350);
   }
 
   throw new Error(`Não foi possível abrir o campo Select2 de ${nomeCampo}.`);
+}
+
+async function fecharPossiveisModaisOuAvisos(page) {
+  await clicarSeExistir(
+    page,
+    [
+      'button:has-text("Fechar")',
+      'button:has-text("OK")',
+      'button:has-text("Ok")',
+      'button:has-text("Entendi")',
+      "button.btn-close",
+      '[aria-label="Close"]',
+    ],
+    "modal/aviso"
+  ).catch(() => null);
+
+  await page.keyboard.press("Escape").catch(() => null);
+  await page.waitForTimeout(200);
 }
 
 async function fazerLogin(page, cnpj, senha) {
@@ -223,10 +329,11 @@ async function fazerLogin(page, cnpj, senha) {
 
   await page.goto("https://www.nfse.gov.br/EmissorNacional/Login", {
     waitUntil: "domcontentloaded",
-    timeout: 60000,
+    timeout: TIMEOUT_MUITO_LONGO,
   });
 
-  await page.waitForLoadState("networkidle").catch(() => null);
+  await esperarPaginaPronta(page, "login", 1200);
+  await fecharPossiveisModaisOuAvisos(page);
 
   await preencherCampoComFallback(
     page,
@@ -235,7 +342,7 @@ async function fazerLogin(page, cnpj, senha) {
       'input[placeholder*="CNPJ"]',
       'input[name="Inscricao"]',
       'input[id*="Inscricao"]',
-      'input[type="text"]',
+      'form input[type="text"]',
     ],
     cnpj,
     "CNPJ de login"
@@ -259,7 +366,7 @@ async function fazerLogin(page, cnpj, senha) {
     "botão Entrar"
   );
 
-  await page.waitForTimeout(900);
+  await page.waitForTimeout(1800);
 
   const erroLogin = await page
     .locator('text="Usuário e/ou senha inválidos"')
@@ -279,10 +386,11 @@ async function abrirTelaPessoas(page) {
 
   await page.goto("https://www.nfse.gov.br/EmissorNacional/DPS/Pessoas", {
     waitUntil: "domcontentloaded",
-    timeout: 60000,
+    timeout: TIMEOUT_MUITO_LONGO,
   });
 
-  await page.waitForLoadState("networkidle").catch(() => null);
+  await esperarPaginaPronta(page, "Pessoas", 1400);
+  await fecharPossiveisModaisOuAvisos(page);
 
   const marcadores = [
     'text="Pessoas"',
@@ -292,7 +400,7 @@ async function abrirTelaPessoas(page) {
     'button:has-text("Avançar")',
   ];
 
-  const ok = await esperarQualquerUm(page, marcadores, 4500);
+  const ok = await esperarQualquerUm(page, marcadores, TIMEOUT_LONGO);
   if (ok) {
     console.log("Tela Pessoas identificada.");
     return;
@@ -309,7 +417,7 @@ async function preencherDataCompetencia(page, dataIso) {
     'xpath=//span[contains(., "Data de Competência")]/following::input[1]',
     'input[id*="Competencia"]',
     'input[name*="Competencia"]',
-    'input.form-control',
+    "input.form-control",
   ];
 
   for (const selector of seletores) {
@@ -318,11 +426,14 @@ async function preencherDataCompetencia(page, dataIso) {
       const count = await locator.count();
       if (!count) continue;
 
-      await locator.waitFor({ state: "visible", timeout: 3500 });
-      await locator.click({ timeout: 3500 });
+      await locator.waitFor({ state: "visible", timeout: TIMEOUT_LONGO });
+      await locator.scrollIntoViewIfNeeded().catch(() => null);
+      await locator.click({ timeout: TIMEOUT_MEDIO });
+      await page.waitForTimeout(150);
       await locator.press("Control+A").catch(() => null);
       await locator.press("Meta+A").catch(() => null);
       await locator.fill("");
+      await page.waitForTimeout(120);
       await locator.type(dataPtBr, { delay: 40 });
 
       const valorAtual = await locator.inputValue().catch(() => "");
@@ -343,12 +454,13 @@ async function clicarEspacoEmBrancoParaCarregarEmitente(page) {
     async () => page.mouse.click(1200, 260),
     async () => page.mouse.click(1100, 320),
     async () => page.locator("body").click({ position: { x: 1100, y: 260 } }),
+    async () => page.locator("body").click({ position: { x: 900, y: 240 } }),
   ];
 
   for (const tentar of tentativas) {
     try {
       await tentar();
-      await page.waitForTimeout(300);
+      await page.waitForTimeout(700);
       return;
     } catch {
       // tenta próxima
@@ -364,7 +476,10 @@ async function esperarEmitentePreenchido(page, cnpj) {
 
   for (const selector of candidatos) {
     try {
-      await page.locator(selector).first().waitFor({ state: "visible", timeout: 2500 });
+      await page
+        .locator(selector)
+        .first()
+        .waitFor({ state: "visible", timeout: TIMEOUT_MEDIO });
       console.log("Dados do emitente preenchidos automaticamente.");
       return;
     } catch {
@@ -379,6 +494,8 @@ async function selecionarBrasilTomador(page) {
   const seletores = [
     'xpath=//div[contains(., "TOMADOR DO SERVIÇO")]//label[contains(., "Brasil")]',
     'xpath=(//label[contains(., "Brasil")])[1]',
+    'label:has-text("Brasil")',
+    'text="Brasil"',
   ];
 
   for (const selector of seletores) {
@@ -387,9 +504,10 @@ async function selecionarBrasilTomador(page) {
       const count = await locator.count();
       if (!count) continue;
 
-      await locator.waitFor({ state: "visible", timeout: 3500 });
-      await locator.click({ timeout: 3500 });
-      await page.waitForTimeout(250);
+      await locator.waitFor({ state: "visible", timeout: TIMEOUT_LONGO });
+      await locator.scrollIntoViewIfNeeded().catch(() => null);
+      await locator.click({ timeout: TIMEOUT_MEDIO, force: true });
+      await page.waitForTimeout(500);
       return;
     } catch {
       // tenta próximo
@@ -415,7 +533,7 @@ async function preencherDocumentoTomador(page, documentoTomador) {
     "Documento do tomador"
   );
 
-  await page.waitForTimeout(120);
+  await page.waitForTimeout(400);
 
   await clicarComFallback(
     page,
@@ -425,23 +543,29 @@ async function preencherDocumentoTomador(page, documentoTomador) {
       'xpath=//label[contains(., "CNPJ")]/following::button[1]',
       'button[title*="Pesquisar"]',
       'button[aria-label*="Pesquisar"]',
-      'button:has(svg)',
+      'button[title*="Buscar"]',
+      'button[aria-label*="Buscar"]',
     ],
     "lupa do tomador"
   );
 
-  await esperarQualquerUm(
+  const carregou = await esperarQualquerUm(
     page,
     [
       'button:has-text("Avançar")',
       'text="Serviço"',
       'text="Município"',
       'text="Código de Tributação Nacional"',
+      'text="Descrição do Serviço"',
     ],
-    1800
+    TIMEOUT_LONGO
   );
 
-  await page.waitForTimeout(180);
+  if (!carregou) {
+    throw new Error("A pesquisa do tomador não retornou para avançar no fluxo.");
+  }
+
+  await page.waitForTimeout(500);
 }
 
 async function preencherEtapaPessoas(page, input) {
@@ -449,7 +573,7 @@ async function preencherEtapaPessoas(page, input) {
   const cnpjEmitente = limparDocumento(input.cnpjEmpresa);
 
   await preencherDataCompetencia(page, input.competencyDate);
-  await page.waitForTimeout(120);
+  await page.waitForTimeout(300);
 
   await clicarEspacoEmBrancoParaCarregarEmitente(page);
   await esperarEmitentePreenchido(page, cnpjEmitente);
@@ -462,6 +586,8 @@ async function preencherEtapaPessoas(page, input) {
     ['button:has-text("Avançar")', 'text="Avançar"'],
     "botão Avançar da etapa Pessoas"
   );
+
+  await esperarPaginaPronta(page, "transição Pessoas > Serviço", 1200);
 }
 
 async function selecionarMunicipioPrestacao(page, municipioCompleto) {
@@ -473,29 +599,16 @@ async function selecionarMunicipioPrestacao(page, municipioCompleto) {
     throw new Error("Município inválido para o Select2.");
   }
 
-  const seletoresCampo = [
-    'xpath=//label[contains(normalize-space(.), "Município")]/following::span[contains(@class,"select2-selection")][1]',
-    'xpath=//label[contains(normalize-space(.), "Municipio")]/following::span[contains(@class,"select2-selection")][1]',
-    'xpath=//*[contains(normalize-space(.), "Município")]/following::span[contains(@class,"select2-selection")][1]',
-    'xpath=//*[contains(normalize-space(.), "Municipio")]/following::span[contains(@class,"select2-selection")][1]',
-    'span.select2-selection.select2-selection--single',
-  ];
-
-  let campoMunicipio = null;
-
-  for (const selector of seletoresCampo) {
-    try {
-      const loc = page.locator(selector).first();
-      const count = await loc.count().catch(() => 0);
-      if (!count) continue;
-      const visivel = await loc.isVisible().catch(() => false);
-      if (!visivel) continue;
-      campoMunicipio = loc;
-      break;
-    } catch {
-      // tenta próximo
-    }
-  }
+  const campoMunicipio = await obterLocatorVisivel(
+    page,
+    [
+      'xpath=//label[contains(normalize-space(.), "Município")]/following::span[contains(@class,"select2-selection")][1]',
+      'xpath=//label[contains(normalize-space(.), "Municipio")]/following::span[contains(@class,"select2-selection")][1]',
+      'xpath=//*[contains(normalize-space(.), "Município")]/following::span[contains(@class,"select2-selection")][1]',
+      'xpath=//*[contains(normalize-space(.), "Municipio")]/following::span[contains(@class,"select2-selection")][1]',
+    ],
+    TIMEOUT_LONGO
+  );
 
   if (!campoMunicipio) {
     throw new Error("Não foi possível localizar o campo Select2 do Município.");
@@ -504,14 +617,14 @@ async function selecionarMunicipioPrestacao(page, municipioCompleto) {
   const inputBusca = await abrirSelect2ECapturarBusca(page, campoMunicipio, "Município");
   await inputBusca.click({ force: true }).catch(() => null);
   await inputBusca.fill("").catch(() => null);
-  await inputBusca.type(nomeMunicipio, { delay: 40 });
-  await page.waitForTimeout(500);
+  await inputBusca.type(nomeMunicipio, { delay: 45 });
+  await page.waitForTimeout(1200);
 
   const opcoes = page.locator("li.select2-results__option");
   let total = await opcoes.count().catch(() => 0);
 
   if (!total) {
-    await page.waitForTimeout(350);
+    await page.waitForTimeout(900);
     total = await opcoes.count().catch(() => 0);
   }
 
@@ -576,8 +689,8 @@ async function selecionarMunicipioPrestacao(page, municipioCompleto) {
   console.log("Município selecionado no Select2:", textoSelecionado);
 
   await melhorOpcao.scrollIntoViewIfNeeded().catch(() => null);
-  await melhorOpcao.click({ force: true, timeout: 3500 });
-  await page.waitForTimeout(250);
+  await melhorOpcao.click({ force: true, timeout: TIMEOUT_MEDIO });
+  await page.waitForTimeout(700);
 }
 
 async function localizarCampoCodigoTributacao(page) {
@@ -588,18 +701,8 @@ async function localizarCampoCodigoTributacao(page) {
     'xpath=//*[contains(normalize-space(.), "Codigo de Tributacao Nacional")]/following::span[contains(@class,"select2-selection")][1]',
   ];
 
-  for (const selector of seletores) {
-    try {
-      const loc = page.locator(selector).first();
-      const count = await loc.count().catch(() => 0);
-      if (!count) continue;
-      const visivel = await loc.isVisible().catch(() => false);
-      if (!visivel) continue;
-      return loc;
-    } catch {
-      // tenta próximo
-    }
-  }
+  const locator = await obterLocatorVisivel(page, seletores, TIMEOUT_LONGO);
+  if (locator) return locator;
 
   throw new Error("Não foi possível localizar o campo Código de Tributação Nacional.");
 }
@@ -619,14 +722,14 @@ async function selecionarCodigoTributacao(page, taxCode) {
 
   await inputBusca.click({ force: true }).catch(() => null);
   await inputBusca.fill("").catch(() => null);
-  await inputBusca.type(codigoOriginal, { delay: 40 });
-  await page.waitForTimeout(650);
+  await inputBusca.type(codigoOriginal, { delay: 45 });
+  await page.waitForTimeout(1200);
 
   const opcoes = page.locator("li.select2-results__option");
   let total = await opcoes.count().catch(() => 0);
 
   if (!total) {
-    await page.waitForTimeout(450);
+    await page.waitForTimeout(900);
     total = await opcoes.count().catch(() => 0);
   }
 
@@ -648,7 +751,10 @@ async function selecionarCodigoTributacao(page, taxCode) {
     if (textoNormalizado.includes("nenhum resultado")) continue;
 
     let pontuacao = 0;
-    if (textoNormalizado.includes(normalizarTexto(codigoOriginal))) pontuacao += 100;
+
+    if (textoNormalizado === normalizarTexto(codigoOriginal)) pontuacao += 1000;
+    if (textoNormalizado.startsWith(normalizarTexto(codigoOriginal))) pontuacao += 700;
+    if (textoNormalizado.includes(normalizarTexto(codigoOriginal))) pontuacao += 300;
 
     if (pontuacao > melhorPontuacao) {
       melhorPontuacao = pontuacao;
@@ -661,9 +767,9 @@ async function selecionarCodigoTributacao(page, taxCode) {
   }
 
   await melhorOpcao.scrollIntoViewIfNeeded().catch(() => null);
-  await melhorOpcao.click({ force: true, timeout: 3500 });
+  await melhorOpcao.click({ force: true, timeout: TIMEOUT_MEDIO });
 
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(1300);
 
   await esperarQualquerUm(
     page,
@@ -674,7 +780,7 @@ async function selecionarCodigoTributacao(page, taxCode) {
       'xpath=//label[contains(., "Descricao do Servico")]',
       "textarea",
     ],
-    4500
+    TIMEOUT_LONGO
   );
 }
 
@@ -682,7 +788,6 @@ async function marcarOpcaoNao(page) {
   const seletores = [
     'xpath=//label[contains(., "não incidência do ISSQN?")]/following::label[contains(normalize-space(.), "Não")][1]',
     'xpath=//label[contains(., "nao incidencia do ISSQN?")]/following::label[contains(normalize-space(.), "Não")][1]',
-    'xpath=//label[contains(normalize-space(.), "Não")][1]',
     'label:has-text("Não")',
     'text="Não"',
   ];
@@ -695,8 +800,9 @@ async function marcarOpcaoNao(page) {
       const visivel = await loc.isVisible().catch(() => false);
       if (!visivel) continue;
 
-      await loc.click({ force: true, timeout: 3500 });
-      await page.waitForTimeout(220);
+      await loc.scrollIntoViewIfNeeded().catch(() => null);
+      await loc.click({ force: true, timeout: TIMEOUT_MEDIO });
+      await page.waitForTimeout(400);
       return;
     } catch {
       // tenta próximo
@@ -722,36 +828,51 @@ async function preencherDescricaoServico(page, descricao) {
   );
 }
 
+async function esperarTelaServico(page) {
+  const marcador = await esperarQualquerUm(
+    page,
+    [
+      'text="Serviço"',
+      'text="Município"',
+      'text="Código de Tributação Nacional"',
+      'text="Descrição do Serviço"',
+    ],
+    TIMEOUT_LONGO
+  );
+
+  if (!marcador) {
+    throw new Error("A etapa Serviço não foi carregada corretamente.");
+  }
+}
+
 async function preencherEtapaServico(page, input) {
-  await page.waitForTimeout(550);
-  await page
-    .locator('text="Serviço"')
-    .first()
-    .waitFor({ state: "visible", timeout: 6000 })
-    .catch(() => null);
-  await page.waitForTimeout(180);
+  await esperarPaginaPronta(page, "Serviço", 1100);
+  await esperarTelaServico(page);
+  await page.waitForTimeout(400);
 
   await selecionarMunicipioPrestacao(page, input.serviceCity);
-  await page.waitForTimeout(180);
+  await page.waitForTimeout(450);
 
   await selecionarCodigoTributacao(page, input.taxCode);
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(750);
 
   await marcarOpcaoNao(page);
-  await page.waitForTimeout(220);
+  await page.waitForTimeout(400);
 
   await preencherDescricaoServico(page, input.serviceDescription);
-  await page.waitForTimeout(260);
+  await page.waitForTimeout(450);
 
   await clicarComFallback(
     page,
     ['button:has-text("Avançar")', 'text="Avançar"'],
     "botão Avançar da etapa Serviço"
   );
+
+  await esperarPaginaPronta(page, "transição Serviço > Valores", 1200);
 }
 
 async function preencherEtapaValores(page, input) {
-  await page.waitForTimeout(250);
+  await esperarPaginaPronta(page, "Valores", 900);
 
   const valorDigitacao = formatarValorParaDigitacaoNoPortal(input.serviceValue);
   console.log("Valor original recebido:", input.serviceValue);
@@ -780,22 +901,31 @@ async function preencherEtapaValores(page, input) {
     "opção não reter"
   );
 
+  await page.waitForTimeout(350);
+
   await clicarComFallback(
     page,
     ['button:has-text("Avançar")', 'text="Avançar"'],
     "botão Avançar da etapa Valores"
   );
 
-  await esperarQualquerUm(
+  const carregouPrevia = await esperarQualquerUm(
     page,
     [
       'button:has-text("Emitir NFS-e")',
       'a:has-text("Emitir NFS-e")',
       'text="PRÉVIA DOS VALORES DA NFS-E"',
+      'text="Visualizar NFS-e"',
       'text="Voltar"',
     ],
-    8000
+    TIMEOUT_LONGO
   );
+
+  if (!carregouPrevia) {
+    throw new Error("A tela final de prévia da emissão não foi carregada.");
+  }
+
+  await esperarPaginaPronta(page, "Prévia da emissão", 1300);
 }
 
 async function salvarDownloadComExtensao(download, caminhoDestino) {
@@ -816,7 +946,7 @@ async function baixarArquivoPorBotao(page, selectors, nomeLogico, nomeArquivo) {
       console.log(`Tentando baixar ${nomeLogico} com seletor: ${selector}`);
 
       const [download] = await Promise.all([
-        page.waitForEvent("download", { timeout: 8000 }),
+        page.waitForEvent("download", { timeout: TIMEOUT_LONGO }),
         botao.click({ force: true }),
       ]);
 
@@ -836,8 +966,36 @@ async function baixarArquivoPorBotao(page, selectors, nomeLogico, nomeArquivo) {
   return null;
 }
 
+async function localizarBotaoFinalEmitir(page) {
+  const candidatos = [
+    page.locator('button:has-text("Emitir NFS-e")'),
+    page.locator('a:has-text("Emitir NFS-e")'),
+    page.locator('input[value*="Emitir NFS-e"]'),
+    page.locator('text="Emitir NFS-e"'),
+  ];
+
+  for (const grupo of candidatos) {
+    const total = await grupo.count().catch(() => 0);
+    if (!total) continue;
+
+    for (let i = total - 1; i >= 0; i--) {
+      const item = grupo.nth(i);
+      const visivel = await item.isVisible().catch(() => false);
+      if (!visivel) continue;
+
+      const texto = ((await item.textContent().catch(() => "")) || "").trim();
+      console.log(`Botão final candidato encontrado [${i}]:`, texto || "[sem texto]");
+      return item;
+    }
+  }
+
+  throw new Error('Não encontrei botão "Emitir NFS-e" na tela final.');
+}
+
 async function emitirNotaNaTelaFinal(page) {
-  await esperarQualquerUm(
+  await esperarPaginaPronta(page, "Tela final antes da emissão", 1800);
+
+  const marcador = await esperarQualquerUm(
     page,
     [
       'button:has-text("Emitir NFS-e")',
@@ -845,25 +1003,24 @@ async function emitirNotaNaTelaFinal(page) {
       'text="PRÉVIA DOS VALORES DA NFS-E"',
       'text="Voltar"',
     ],
-    6000
+    TIMEOUT_LONGO
   );
 
-  const botoes = page.locator('button:has-text("Emitir NFS-e"), a:has-text("Emitir NFS-e")');
-  const total = await botoes.count().catch(() => 0);
-
-  if (!total) {
-    throw new Error('Não encontrei botão "Emitir NFS-e" na tela final.');
+  if (!marcador) {
+    throw new Error('Não encontrei os marcadores da tela final de emissão.');
   }
 
-  const indice = total > 1 ? 1 : 0;
-  const botaoFinal = botoes.nth(indice);
+  const botaoFinal = await localizarBotaoFinalEmitir(page);
 
   await botaoFinal.scrollIntoViewIfNeeded().catch(() => null);
-  await botaoFinal.click({ force: true, timeout: 2000 });
+  await botaoFinal.waitFor({ state: "visible", timeout: TIMEOUT_LONGO });
+  await page.waitForTimeout(1200);
 
-  console.log(`Clique realizado no botão Emitir NFS-e índice ${indice}.`);
+  await botaoFinal.click({ timeout: TIMEOUT_LONGO, force: true });
 
-  await esperarQualquerUm(
+  console.log("Clique realizado no botão final Emitir NFS-e.");
+
+  const apareceuAlgo = await esperarQualquerUm(
     page,
     [
       'text="Baixar DANFSe"',
@@ -871,16 +1028,21 @@ async function emitirNotaNaTelaFinal(page) {
       'text="Visualizar NFS-e"',
       'text="NFS-e emitidas"',
       'text="A NFS-e foi gerada com sucesso"',
+      'text="Processando"',
+      'text="Aguarde"',
     ],
-    7000
+    TIMEOUT_LONGO
   );
+
+  if (!apareceuAlgo) {
+    throw new Error("Após clicar em Emitir NFS-e, a tela não apresentou resposta.");
+  }
 }
 
 async function esperarConclusaoEmissao(page) {
-  const timeoutTotal = 10000;
   const inicio = Date.now();
 
-  while (Date.now() - inicio < timeoutTotal) {
+  while (Date.now() - inicio < TIMEOUT_EMISSAO_FINAL) {
     const sucesso = await esperarQualquerUm(
       page,
       [
@@ -890,12 +1052,30 @@ async function esperarConclusaoEmissao(page) {
         'text="NFS-e emitidas"',
         'text="A NFS-e foi gerada com sucesso"',
       ],
-      1500
+      3000
     );
 
-    if (sucesso) return;
+    if (sucesso) {
+      console.log("Confirmação de emissão encontrada:", sucesso);
+      return;
+    }
 
-    await page.waitForTimeout(300);
+    const mensagemErro = await esperarQualquerUm(
+      page,
+      [
+        'text="Erro"',
+        'text="Não foi possível"',
+        'text="Tente novamente"',
+        'text="Falha"',
+      ],
+      1200
+    );
+
+    if (mensagemErro) {
+      console.log("Mensagem de erro detectada durante conclusão:", mensagemErro);
+    }
+
+    await page.waitForTimeout(800);
   }
 
   throw new Error("A emissão não foi confirmada na tela final.");
@@ -920,7 +1100,7 @@ async function capturarLinksResultado(page) {
 }
 
 async function capturarChaveOuNumeroNfse(page) {
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 12; i++) {
     const textoPagina = (await page.textContent("body").catch(() => "")) || "";
 
     const match44 = textoPagina.match(/\b\d{44}\b/);
@@ -938,7 +1118,7 @@ async function capturarChaveOuNumeroNfse(page) {
       return matchNumero[1];
     }
 
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(700);
   }
 
   return null;
@@ -985,6 +1165,14 @@ async function executarFluxoCompleto(page, input) {
   return await concluirEmissao(page);
 }
 
+async function criarContexto(browser) {
+  return await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    acceptDownloads: true,
+    ignoreHTTPSErrors: true,
+  });
+}
+
 export async function emitirNfseViaAutomacao(input) {
   let ultimoErro = null;
   const maxTentativas = 2;
@@ -1012,21 +1200,34 @@ export async function emitirNfseViaAutomacao(input) {
 
       browser = await chromium.launch({
         headless,
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-blink-features=AutomationControlled",
+          "--single-process",
+        ],
         slowMo: headless ? 0 : 60,
       });
 
-      const context = await browser.newContext({
-        viewport: { width: 1440, height: 900 },
-        acceptDownloads: true,
-      });
-
+      const context = await criarContexto(browser);
       const page = await context.newPage();
 
-      const resultado = await executarFluxoCompleto(page, input);
+      page.setDefaultTimeout(TIMEOUT_LONGO);
+      page.setDefaultNavigationTimeout(TIMEOUT_MUITO_LONGO);
+
+      const resultado = await aguardarComTentativas(
+        () => executarFluxoCompleto(page, input),
+        1,
+        0,
+        "fluxo completo da automação"
+      );
+
       console.log("✅ Resultado da automação:", resultado);
 
+      await context.close().catch(() => null);
       await browser.close().catch(() => null);
+
       return resultado;
     } catch (error) {
       ultimoErro = error;
@@ -1043,6 +1244,7 @@ export async function emitirNfseViaAutomacao(input) {
       }
 
       console.log("🔁 Erro transitório detectado. Tentando novamente...");
+      await new Promise((resolve) => setTimeout(resolve, 2000));
     }
   }
 
