@@ -1,3 +1,4 @@
+import fs from "fs/promises";
 
 const { chromium } = await import("playwright");
 
@@ -1146,14 +1147,27 @@ async function concluirEmissao(page) {
     "nfse.pdf"
   );
 
+  let pdfBase64 = null;
+  let xmlBase64 = null;
+
+  if (pdfPath) {
+    const pdfBuffer = await fs.readFile(pdfPath);
+    pdfBase64 = pdfBuffer.toString("base64");
+  }
+
+  if (xmlPath) {
+    const xmlBuffer = await fs.readFile(xmlPath);
+    xmlBase64 = xmlBuffer.toString("base64");
+  }
+
   return {
     success: true,
     message: "NFS-e emitida com sucesso.",
     pdfUrl,
     xmlUrl,
     nfseKey,
-    pdfPath,
-    xmlPath,
+    pdfBase64,
+    xmlBase64,
   };
 }
 
@@ -1259,7 +1273,7 @@ export async function emitirNfseViaAutomacao(input) {
     pdfUrl: null,
     xmlUrl: null,
     nfseKey: null,
-    pdfPath: null,
-    xmlPath: null,
+    pdfBase64: null,
+    xmlBase64: null,
   };
 }
