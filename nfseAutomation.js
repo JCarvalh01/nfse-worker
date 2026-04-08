@@ -1,4 +1,5 @@
 import fs from "fs/promises";
+import { createClient } from "@supabase/supabase-js";
 
 const { chromium } = await import("playwright");
 
@@ -7,6 +8,19 @@ const TIMEOUT_MEDIO = 15000;
 const TIMEOUT_LONGO = 35000;
 const TIMEOUT_MUITO_LONGO = 60000;
 const TIMEOUT_EMISSAO_FINAL = 120000;
+
+const STORAGE_BUCKET = "nfse-files";
+
+const supabaseAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL || "",
+  process.env.SUPABASE_SERVICE_ROLE_KEY || "",
+  {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  }
+);
 
 function limparDocumento(valor) {
   return String(valor || "").replace(/\D/g, "");
@@ -158,9 +172,7 @@ async function obterLocatorVisivel(page, selectors, timeout = TIMEOUT_MEDIO) {
 
       await locator.waitFor({ state: "visible", timeout });
       return locator;
-    } catch {
-      // tenta próximo
-    }
+    } catch {}
   }
 
   return null;
@@ -193,9 +205,7 @@ async function preencherCampoComFallback(page, selectors, valor, nomeCampo) {
       }
 
       return;
-    } catch {
-      // tenta próximo
-    }
+    } catch {}
   }
 
   throw new Error(`Não foi possível preencher o campo ${nomeCampo}.`);
@@ -214,9 +224,7 @@ async function clicarComFallback(page, selectors, nome) {
       await locator.click({ timeout: TIMEOUT_MEDIO, force: true });
       console.log(`Clique realizado em ${nome} com seletor: ${selector}`);
       return;
-    } catch {
-      // tenta próximo
-    }
+    } catch {}
   }
 
   throw new Error(`Não foi possível clicar em ${nome}.`);
@@ -236,9 +244,7 @@ async function clicarSeExistir(page, selectors, nome) {
       await locator.click({ timeout: TIMEOUT_CURTO, force: true });
       console.log(`Clique opcional em ${nome} com seletor: ${selector}`);
       return true;
-    } catch {
-      // tenta próximo
-    }
+    } catch {}
   }
 
   console.log(`Elemento opcional não encontrado: ${nome}`);
@@ -260,9 +266,7 @@ async function esperarQualquerUm(page, selectors, timeout = TIMEOUT_MEDIO) {
 
         console.log("Elemento identificado:", selector);
         return selector;
-      } catch {
-        // tenta próximo
-      }
+      } catch {}
     }
 
     await page.waitForTimeout(300);
@@ -443,9 +447,7 @@ async function preencherDataCompetencia(page, dataIso) {
         console.log("Data de competência preenchida com sucesso.");
         return;
       }
-    } catch {
-      // tenta próximo
-    }
+    } catch {}
   }
 
   throw new Error("Não foi possível preencher a data de competência.");
@@ -464,9 +466,7 @@ async function clicarEspacoEmBrancoParaCarregarEmitente(page) {
       await tentar();
       await page.waitForTimeout(700);
       return;
-    } catch {
-      // tenta próxima
-    }
+    } catch {}
   }
 }
 
@@ -484,9 +484,7 @@ async function esperarEmitentePreenchido(page, cnpj) {
         .waitFor({ state: "visible", timeout: TIMEOUT_MEDIO });
       console.log("Dados do emitente preenchidos automaticamente.");
       return;
-    } catch {
-      // tenta próximo
-    }
+    } catch {}
   }
 
   console.log("Não consegui confirmar visualmente o preenchimento do emitente.");
@@ -511,9 +509,7 @@ async function selecionarBrasilTomador(page) {
       await locator.click({ timeout: TIMEOUT_MEDIO, force: true });
       await page.waitForTimeout(500);
       return;
-    } catch {
-      // tenta próximo
-    }
+    } catch {}
   }
 
   throw new Error("Não foi possível selecionar Brasil no Tomador do Serviço.");
@@ -806,9 +802,7 @@ async function marcarOpcaoNao(page) {
       await loc.click({ force: true, timeout: TIMEOUT_MEDIO });
       await page.waitForTimeout(400);
       return;
-    } catch {
-      // tenta próximo
-    }
+    } catch {}
   }
 
   throw new Error('Não foi possível marcar a opção "Não".');
@@ -935,6 +929,25 @@ async function salvarDownloadComExtensao(download, caminhoDestino) {
   return caminhoDestino;
 }
 
+async function uploadBufferToStorage(buffer, destinationPath, contentType) {
+  const { error } = await supabaseAdmin.storage
+    .from(STORAGE_BUCKET)
+    .upload(destinationPath, buffer, {
+      contentType,
+      upsert: true,
+    });
+
+  if (error) {
+    throw new Error(`Erro ao enviar arquivo para o Storage: ${error.message}`);
+  }
+
+  const { data } = supabaseAdmin.storage
+    .from(STORAGE_BUCKET)
+    .getPublicUrl(destinationPath);
+
+  return data?.publicUrl || null;
+}
+
 async function baixarArquivoPorBotao(page, selectors, nomeLogico, nomeArquivo) {
   for (const selector of selectors) {
     try {
@@ -958,7 +971,10 @@ async function baixarArquivoPorBotao(page, selectors, nomeLogico, nomeArquivo) {
       console.log(`${nomeLogico} salvo em: ${path}`);
       console.log(`${nomeLogico} nome sugerido pelo portal: ${download.suggestedFilename()}`);
 
-      return path;
+      return {
+        path,
+        suggestedFilename: download.suggestedFilename(),
+      };
     } catch (error) {
       console.log(`Falha ao baixar ${nomeLogico} com seletor ${selector}:`, error);
     }
@@ -1133,41 +1149,51 @@ async function concluirEmissao(page) {
   const { pdfUrl, xmlUrl } = await capturarLinksResultado(page);
   const nfseKey = await capturarChaveOuNumeroNfse(page);
 
-  const xmlPath = await baixarArquivoPorBotao(
+  const xmlFile = await baixarArquivoPorBotao(
     page,
     ['a:has-text("Baixar XML")', 'button:has-text("Baixar XML")', 'text="Baixar XML"'],
     "XML",
     "nfse.xml"
   );
 
-  const pdfPath = await baixarArquivoPorBotao(
+  const pdfFile = await baixarArquivoPorBotao(
     page,
     ['a:has-text("Baixar DANFSe")', 'button:has-text("Baixar DANFSe")', 'text="Baixar DANFSe"'],
     "DANFSe",
     "nfse.pdf"
   );
 
-  let pdfBase64 = null;
-  let xmlBase64 = null;
+  let pdfStorageUrl = null;
+  let xmlStorageUrl = null;
 
-  if (pdfPath) {
-    const pdfBuffer = await fs.readFile(pdfPath);
-    pdfBase64 = pdfBuffer.toString("base64");
+  if (pdfFile?.path && nfseKey) {
+    const pdfBuffer = await fs.readFile(pdfFile.path);
+    pdfStorageUrl = await uploadBufferToStorage(
+      pdfBuffer,
+      `worker/${nfseKey}.pdf`,
+      "application/pdf"
+    );
+    console.log("PDF enviado ao Supabase Storage:", pdfStorageUrl);
   }
 
-  if (xmlPath) {
-    const xmlBuffer = await fs.readFile(xmlPath);
-    xmlBase64 = xmlBuffer.toString("base64");
+  if (xmlFile?.path && nfseKey) {
+    const xmlBuffer = await fs.readFile(xmlFile.path);
+    xmlStorageUrl = await uploadBufferToStorage(
+      xmlBuffer,
+      `worker/${nfseKey}.xml`,
+      "application/xml"
+    );
+    console.log("XML enviado ao Supabase Storage:", xmlStorageUrl);
   }
 
   return {
     success: true,
     message: "NFS-e emitida com sucesso.",
-    pdfUrl,
-    xmlUrl,
+    pdfUrl: pdfStorageUrl || pdfUrl,
+    xmlUrl: xmlStorageUrl || xmlUrl,
     nfseKey,
-    pdfBase64,
-    xmlBase64,
+    pdfBase64: null,
+    xmlBase64: null,
   };
 }
 
