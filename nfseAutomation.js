@@ -924,9 +924,16 @@ async function preencherEtapaValores(page, input) {
   await esperarPaginaPronta(page, "Prévia da emissão", 1300);
 }
 
-async function salvarDownloadComExtensao(download, caminhoDestino) {
-  await download.saveAs(caminhoDestino);
-  return caminhoDestino;
+async function salvarDownloadComExtensao(download, nomeArquivo) {
+  const pathTemp = await download.path();
+
+  if (!pathTemp) {
+    throw new Error(`Download não retornou caminho do arquivo: ${nomeArquivo}`);
+  }
+
+  console.log(`Arquivo ${nomeArquivo} baixado em:`, pathTemp);
+
+  return pathTemp;
 }
 
 async function uploadBufferToStorage(buffer, destinationPath, contentType) {
@@ -965,8 +972,7 @@ async function baixarArquivoPorBotao(page, selectors, nomeLogico, nomeArquivo) {
         botao.click({ force: true }),
       ]);
 
-      const path = `/tmp/${nomeArquivo}`;
-      await salvarDownloadComExtensao(download, path);
+      const path = await salvarDownloadComExtensao(download, nomeArquivo);
 
       console.log(`${nomeLogico} salvo em: ${path}`);
       console.log(`${nomeLogico} nome sugerido pelo portal: ${download.suggestedFilename()}`);
@@ -1165,9 +1171,12 @@ async function concluirEmissao(page) {
 
   let pdfStorageUrl = null;
   let xmlStorageUrl = null;
+  let pdfBase64 = null;
+  let xmlBase64 = null;
 
   if (pdfFile?.path && nfseKey) {
     const pdfBuffer = await fs.readFile(pdfFile.path);
+    pdfBase64 = pdfBuffer.toString("base64");
     pdfStorageUrl = await uploadBufferToStorage(
       pdfBuffer,
       `worker/${nfseKey}.pdf`,
@@ -1178,6 +1187,7 @@ async function concluirEmissao(page) {
 
   if (xmlFile?.path && nfseKey) {
     const xmlBuffer = await fs.readFile(xmlFile.path);
+    xmlBase64 = xmlBuffer.toString("base64");
     xmlStorageUrl = await uploadBufferToStorage(
       xmlBuffer,
       `worker/${nfseKey}.xml`,
@@ -1192,8 +1202,8 @@ async function concluirEmissao(page) {
     pdfUrl: pdfStorageUrl || pdfUrl,
     xmlUrl: xmlStorageUrl || xmlUrl,
     nfseKey,
-    pdfBase64: null,
-    xmlBase64: null,
+    pdfBase64,
+    xmlBase64,
   };
 }
 
