@@ -925,15 +925,14 @@ async function preencherEtapaValores(page, input) {
 }
 
 async function salvarDownloadComExtensao(download, nomeArquivo) {
-  const pathTemp = await download.path();
+  const caminho = `/tmp/${Date.now()}-${nomeArquivo}`;
 
-  if (!pathTemp) {
-    throw new Error(`Download não retornou caminho do arquivo: ${nomeArquivo}`);
-  }
+  await download.saveAs(caminho);
+  await fs.access(caminho);
 
-  console.log(`Arquivo ${nomeArquivo} baixado em:`, pathTemp);
+  console.log(`Arquivo ${nomeArquivo} salvo em:`, caminho);
 
-  return pathTemp;
+  return caminho;
 }
 
 async function uploadBufferToStorage(buffer, destinationPath, contentType) {
