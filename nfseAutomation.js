@@ -1,4 +1,3 @@
-process.env.PLAYWRIGHT_BROWSERS_PATH = "0";
 
 const { chromium } = await import("playwright");
 
