@@ -1,4 +1,3 @@
-import fs from "fs/promises";
 import { createClient } from "@supabase/supabase-js";
 
 const { chromium } = await import("playwright");
@@ -924,15 +923,28 @@ async function preencherEtapaValores(page, input) {
   await esperarPaginaPronta(page, "Prévia da emissão", 1300);
 }
 
-async function salvarDownloadComExtensao(download, nomeArquivo) {
-  const caminho = `/tmp/${Date.now()}-${nomeArquivo}`;
+async function capturarDownloadEmMemoria(download, nomeArquivo) {
+  const stream = await download.createReadStream();
 
-  await download.saveAs(caminho);
-  await fs.access(caminho);
+  if (!stream) {
+    throw new Error(`Não foi possível abrir o download de ${nomeArquivo}.`);
+  }
 
-  console.log(`Arquivo ${nomeArquivo} salvo em:`, caminho);
+  const chunks = [];
 
-  return caminho;
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  const buffer = Buffer.concat(chunks);
+
+  if (!buffer.length) {
+    throw new Error(`O download de ${nomeArquivo} veio vazio.`);
+  }
+
+  console.log(`Arquivo ${nomeArquivo} capturado em memória (${buffer.length} bytes).`);
+
+  return buffer;
 }
 
 async function uploadBufferToStorage(buffer, destinationPath, contentType) {
@@ -966,22 +978,27 @@ async function baixarArquivoPorBotao(page, selectors, nomeLogico, nomeArquivo) {
 
       console.log(`Tentando baixar ${nomeLogico} com seletor: ${selector}`);
 
-      const [download] = await Promise.all([
-        page.waitForEvent("download", { timeout: TIMEOUT_LONGO }),
-        botao.click({ force: true }),
-      ]);
+      await botao.scrollIntoViewIfNeeded().catch(() => null);
+      await page.waitForTimeout(500);
 
-      const path = await salvarDownloadComExtensao(download, nomeArquivo);
+      const downloadPromise = page.waitForEvent("download", {
+        timeout: 15000,
+      });
 
-      console.log(`${nomeLogico} salvo em: ${path}`);
+      await botao.click({ force: true });
+
+      const download = await downloadPromise;
+      const buffer = await capturarDownloadEmMemoria(download, nomeArquivo);
+
+      console.log(`${nomeLogico} capturado com sucesso (${buffer.length} bytes)`);
       console.log(`${nomeLogico} nome sugerido pelo portal: ${download.suggestedFilename()}`);
 
       return {
-        path,
+        buffer,
         suggestedFilename: download.suggestedFilename(),
       };
     } catch (error) {
-      console.log(`Falha ao baixar ${nomeLogico} com seletor ${selector}:`, error);
+      console.log(`Falha ao baixar ${nomeLogico}:`, error);
     }
   }
 
@@ -1173,8 +1190,8 @@ async function concluirEmissao(page) {
   let pdfBase64 = null;
   let xmlBase64 = null;
 
-  if (pdfFile?.path && nfseKey) {
-    const pdfBuffer = await fs.readFile(pdfFile.path);
+  if (pdfFile?.buffer && nfseKey) {
+    const pdfBuffer = pdfFile.buffer;
     pdfBase64 = pdfBuffer.toString("base64");
     pdfStorageUrl = await uploadBufferToStorage(
       pdfBuffer,
@@ -1184,8 +1201,8 @@ async function concluirEmissao(page) {
     console.log("PDF enviado ao Supabase Storage:", pdfStorageUrl);
   }
 
-  if (xmlFile?.path && nfseKey) {
-    const xmlBuffer = await fs.readFile(xmlFile.path);
+  if (xmlFile?.buffer && nfseKey) {
+    const xmlBuffer = xmlFile.buffer;
     xmlBase64 = xmlBuffer.toString("base64");
     xmlStorageUrl = await uploadBufferToStorage(
       xmlBuffer,
