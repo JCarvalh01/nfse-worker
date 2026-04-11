@@ -9,6 +9,7 @@ const TIMEOUT_MUITO_LONGO = 60000;
 const TIMEOUT_EMISSAO_FINAL = 120000;
 
 const STORAGE_BUCKET = "nfse-files";
+const NFSE_PORTAL_BASE_URL = "https://www.nfse.gov.br";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL || "",
@@ -124,6 +125,21 @@ function erroEhTransitorio(erro) {
   ];
 
   return errosTransitorios.some((trecho) => msg.includes(trecho));
+}
+
+function normalizarUrlArquivo(valor) {
+  const url = String(valor || "").trim();
+  if (!url) return null;
+
+  if (url.startsWith("http://") || url.startsWith("https://")) {
+    return url;
+  }
+
+  if (url.startsWith("/")) {
+    return `${NFSE_PORTAL_BASE_URL}${url}`;
+  }
+
+  return null;
 }
 
 async function esperarRedeEstabilizar(page, atraso = 800) {
@@ -966,8 +982,36 @@ async function uploadBufferToStorage(buffer, destinationPath, contentType) {
   return data?.publicUrl || null;
 }
 
+async function baixarConteudoPorUrl(context, url, nomeArquivo) {
+  const urlFinal = normalizarUrlArquivo(url);
+  if (!urlFinal) return null;
+
+  const response = await context.request.get(urlFinal, {
+    timeout: TIMEOUT_MEDIO,
+  }).catch(() => null);
+
+  if (!response || !response.ok()) {
+    return null;
+  }
+
+  const buffer = Buffer.from(await response.body());
+
+  if (!buffer.length) {
+    return null;
+  }
+
+  console.log(`Arquivo ${nomeArquivo} capturado via URL (${buffer.length} bytes).`);
+
+  return {
+    buffer,
+    suggestedFilename: nomeArquivo,
+  };
+}
+
 async function baixarArquivoPorBotao(page, selectors, nomeLogico, nomeArquivo) {
   for (const selector of selectors) {
+    let popup = null;
+
     try {
       const botao = page.locator(selector).first();
       const count = await botao.count().catch(() => 0);
@@ -981,24 +1025,107 @@ async function baixarArquivoPorBotao(page, selectors, nomeLogico, nomeArquivo) {
       await botao.scrollIntoViewIfNeeded().catch(() => null);
       await page.waitForTimeout(500);
 
-      const downloadPromise = page.waitForEvent("download", {
-        timeout: 15000,
-      });
+      const hrefAntesClique = await botao.getAttribute("href").catch(() => null);
+
+      const downloadPromise = page
+        .waitForEvent("download", { timeout: 8000 })
+        .catch(() => null);
+
+      const popupPromise = page
+        .waitForEvent("popup", { timeout: 8000 })
+        .catch(() => null);
 
       await botao.click({ force: true });
 
       const download = await downloadPromise;
-      const buffer = await capturarDownloadEmMemoria(download, nomeArquivo);
+      if (download) {
+        const buffer = await capturarDownloadEmMemoria(download, nomeArquivo);
 
-      console.log(`${nomeLogico} capturado com sucesso (${buffer.length} bytes)`);
-      console.log(`${nomeLogico} nome sugerido pelo portal: ${download.suggestedFilename()}`);
+        console.log(`${nomeLogico} capturado com sucesso via download (${buffer.length} bytes)`);
+        console.log(`${nomeLogico} nome sugerido pelo portal: ${download.suggestedFilename()}`);
 
-      return {
-        buffer,
-        suggestedFilename: download.suggestedFilename(),
-      };
+        return {
+          buffer,
+          suggestedFilename: download.suggestedFilename(),
+        };
+      }
+
+      popup = await popupPromise;
+      if (popup) {
+        await popup.waitForLoadState("domcontentloaded").catch(() => null);
+        await popup.waitForTimeout(1200);
+
+        const popupDownload = await popup
+          .waitForEvent("download", { timeout: 8000 })
+          .catch(() => null);
+
+        if (popupDownload) {
+          const buffer = await capturarDownloadEmMemoria(popupDownload, nomeArquivo);
+
+          console.log(
+            `${nomeLogico} capturado com sucesso via popup-download (${buffer.length} bytes)`
+          );
+          console.log(
+            `${nomeLogico} nome sugerido pelo portal: ${popupDownload.suggestedFilename()}`
+          );
+
+          await popup.close().catch(() => null);
+
+          return {
+            buffer,
+            suggestedFilename: popupDownload.suggestedFilename(),
+          };
+        }
+
+        const popupUrl = popup.url();
+        const viaPopupUrl = await baixarConteudoPorUrl(
+          popup.context(),
+          popupUrl,
+          nomeArquivo
+        );
+
+        if (viaPopupUrl) {
+          console.log(`${nomeLogico} capturado com sucesso via popup-url.`);
+          await popup.close().catch(() => null);
+          return viaPopupUrl;
+        }
+
+        const anchors = popup.locator("a[href]");
+        const totalAnchors = await anchors.count().catch(() => 0);
+
+        for (let i = 0; i < totalAnchors; i++) {
+          const href = await anchors.nth(i).getAttribute("href").catch(() => null);
+          const viaAnchor = await baixarConteudoPorUrl(
+            popup.context(),
+            href,
+            nomeArquivo
+          );
+
+          if (viaAnchor) {
+            console.log(`${nomeLogico} capturado com sucesso via link interno do popup.`);
+            await popup.close().catch(() => null);
+            return viaAnchor;
+          }
+        }
+
+        await popup.close().catch(() => null);
+      }
+
+      const viaHrefDireto = await baixarConteudoPorUrl(
+        page.context(),
+        hrefAntesClique,
+        nomeArquivo
+      );
+
+      if (viaHrefDireto) {
+        console.log(`${nomeLogico} capturado com sucesso via href direto.`);
+        return viaHrefDireto;
+      }
     } catch (error) {
       console.log(`Falha ao baixar ${nomeLogico}:`, error);
+      if (popup) {
+        await popup.close().catch(() => null);
+      }
     }
   }
 
@@ -1059,24 +1186,6 @@ async function emitirNotaNaTelaFinal(page) {
   await botaoFinal.click({ timeout: TIMEOUT_LONGO, force: true });
 
   console.log("Clique realizado no botão final Emitir NFS-e.");
-
-  const apareceuAlgo = await esperarQualquerUm(
-    page,
-    [
-      'text="Baixar DANFSe"',
-      'text="Baixar XML"',
-      'text="Visualizar NFS-e"',
-      'text="NFS-e emitidas"',
-      'text="A NFS-e foi gerada com sucesso"',
-      'text="Processando"',
-      'text="Aguarde"',
-    ],
-    TIMEOUT_LONGO
-  );
-
-  if (!apareceuAlgo) {
-    throw new Error("Após clicar em Emitir NFS-e, a tela não apresentou resposta.");
-  }
 }
 
 async function esperarConclusaoEmissao(page) {
@@ -1086,76 +1195,94 @@ async function esperarConclusaoEmissao(page) {
     const sucesso = await esperarQualquerUm(
       page,
       [
-        'text="Baixar DANFSe"',
+        'text="NFS-e emitida com sucesso"',
+        'text="emitida com sucesso"',
         'text="Baixar XML"',
+        'text="Baixar DANFSe"',
         'text="Visualizar NFS-e"',
-        'text="NFS-e emitidas"',
-        'text="A NFS-e foi gerada com sucesso"',
+        'text="Número da NFS-e"',
+        'text="Chave de acesso"',
       ],
-      3000
+      2500
     );
 
     if (sucesso) {
-      console.log("Confirmação de emissão encontrada:", sucesso);
+      await page.waitForTimeout(1500);
       return;
     }
 
-    const mensagemErro = await esperarQualquerUm(
+    const erroTela = await esperarQualquerUm(
       page,
       [
         'text="Erro"',
         'text="Não foi possível"',
         'text="Tente novamente"',
         'text="Falha"',
+        'text="Rejeição"',
       ],
       1200
     );
 
-    if (mensagemErro) {
-      console.log("Mensagem de erro detectada durante conclusão:", mensagemErro);
+    if (erroTela) {
+      const texto = await page.locator("body").innerText().catch(() => "");
+      throw new Error(texto || "A emissão não foi confirmada na tela final.");
     }
 
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(1200);
   }
 
   throw new Error("A emissão não foi confirmada na tela final.");
 }
 
 async function capturarLinksResultado(page) {
-  const pdfUrl =
-    (await page
-      .locator('a:has-text("Baixar DANFSe")')
-      .first()
-      .getAttribute("href")
-      .catch(() => null)) || null;
+  const anchors = page.locator("a[href]");
+  const total = await anchors.count().catch(() => 0);
 
-  const xmlUrl =
-    (await page
-      .locator('a:has-text("Baixar XML")')
-      .first()
-      .getAttribute("href")
-      .catch(() => null)) || null;
+  let pdfUrl = null;
+  let xmlUrl = null;
+
+  for (let i = 0; i < total; i++) {
+    const item = anchors.nth(i);
+    const texto = normalizarTexto(await item.textContent().catch(() => ""));
+    const href = await item.getAttribute("href").catch(() => null);
+    const url = normalizarUrlArquivo(href);
+
+    if (!url) continue;
+
+    if (!pdfUrl && (texto.includes("danfse") || texto.includes("pdf"))) {
+      pdfUrl = url;
+    }
+
+    if (!xmlUrl && texto.includes("xml")) {
+      xmlUrl = url;
+    }
+  }
 
   return { pdfUrl, xmlUrl };
 }
 
 async function capturarChaveOuNumeroNfse(page) {
-  for (let i = 0; i < 12; i++) {
-    const textoPagina = (await page.textContent("body").catch(() => "")) || "";
+  const inicio = Date.now();
 
-    const match44 = textoPagina.match(/\b\d{44}\b/);
-    if (match44) {
-      return match44[0];
+  while (Date.now() - inicio < 15000) {
+    const textoTela = await page.locator("body").innerText().catch(() => "");
+    const texto = String(textoTela || "");
+
+    const matchChave =
+      texto.match(/chave\s*(?:de\s*acesso)?\s*[:\-]?\s*([0-9A-Za-z.\-\/]+)/i) ||
+      texto.match(/chave\s*[:\-]?\s*([0-9A-Za-z.\-\/]+)/i);
+
+    if (matchChave?.[1]) {
+      return matchChave[1].trim();
     }
 
-    const matchChave = textoPagina.match(/Chave\s*(de acesso)?\s*[:\-]?\s*(\d{30,})/i);
-    if (matchChave) {
-      return matchChave[2];
-    }
+    const matchNumero =
+      texto.match(/n[úu]mero\s*da\s*nfs-e\s*[:\-]?\s*([0-9A-Za-z.\-\/]+)/i) ||
+      texto.match(/nfs-e\s*n[úu]mero\s*[:\-]?\s*([0-9A-Za-z.\-\/]+)/i) ||
+      texto.match(/nfs-e\s*[:\-]?\s*([0-9A-Za-z.\-\/]+)/i);
 
-    const matchNumero = textoPagina.match(/NFS-e\s*[:\-]?\s*(\d+)/i);
-    if (matchNumero) {
-      return matchNumero[1];
+    if (matchNumero?.[1]) {
+      return matchNumero[1].trim();
     }
 
     await page.waitForTimeout(700);
@@ -1170,6 +1297,12 @@ async function concluirEmissao(page) {
 
   const { pdfUrl, xmlUrl } = await capturarLinksResultado(page);
   const nfseKey = await capturarChaveOuNumeroNfse(page);
+
+  if (!nfseKey) {
+    throw new Error(
+      "A nota foi emitida no portal, mas a chave/NFS-e não foi capturada na tela final."
+    );
+  }
 
   const xmlFile = await baixarArquivoPorBotao(
     page,
@@ -1190,33 +1323,43 @@ async function concluirEmissao(page) {
   let pdfBase64 = null;
   let xmlBase64 = null;
 
-  if (pdfFile?.buffer && nfseKey) {
+  if (pdfFile?.buffer) {
     const pdfBuffer = pdfFile.buffer;
     pdfBase64 = pdfBuffer.toString("base64");
-    pdfStorageUrl = await uploadBufferToStorage(
-      pdfBuffer,
-      `worker/${nfseKey}.pdf`,
-      "application/pdf"
-    );
-    console.log("PDF enviado ao Supabase Storage:", pdfStorageUrl);
+
+    try {
+      pdfStorageUrl = await uploadBufferToStorage(
+        pdfBuffer,
+        `worker/${nfseKey}.pdf`,
+        "application/pdf"
+      );
+      console.log("PDF enviado ao Supabase Storage:", pdfStorageUrl);
+    } catch (error) {
+      console.log("Falha ao enviar PDF ao Storage:", error);
+    }
   }
 
-  if (xmlFile?.buffer && nfseKey) {
+  if (xmlFile?.buffer) {
     const xmlBuffer = xmlFile.buffer;
     xmlBase64 = xmlBuffer.toString("base64");
-    xmlStorageUrl = await uploadBufferToStorage(
-      xmlBuffer,
-      `worker/${nfseKey}.xml`,
-      "application/xml"
-    );
-    console.log("XML enviado ao Supabase Storage:", xmlStorageUrl);
+
+    try {
+      xmlStorageUrl = await uploadBufferToStorage(
+        xmlBuffer,
+        `worker/${nfseKey}.xml`,
+        "application/xml"
+      );
+      console.log("XML enviado ao Supabase Storage:", xmlStorageUrl);
+    } catch (error) {
+      console.log("Falha ao enviar XML ao Storage:", error);
+    }
   }
 
   return {
     success: true,
     message: "NFS-e emitida com sucesso.",
-    pdfUrl: pdfStorageUrl || pdfUrl,
-    xmlUrl: xmlStorageUrl || xmlUrl,
+    pdfUrl: pdfStorageUrl || pdfUrl || null,
+    xmlUrl: xmlStorageUrl || xmlUrl || null,
     nfseKey,
     pdfBase64,
     xmlBase64,
@@ -1285,13 +1428,11 @@ export async function emitirNfseViaAutomacao(input) {
       page.setDefaultNavigationTimeout(TIMEOUT_MUITO_LONGO);
 
       const resultado = await aguardarComTentativas(
-        () => executarFluxoCompleto(page, input),
+        async () => await executarFluxoCompleto(page, input),
         1,
         0,
-        "fluxo completo da automação"
+        "fluxo principal da emissão"
       );
-
-      console.log("✅ Resultado da automação:", resultado);
 
       await context.close().catch(() => null);
       await browser.close().catch(() => null);
@@ -1299,33 +1440,88 @@ export async function emitirNfseViaAutomacao(input) {
       return resultado;
     } catch (error) {
       ultimoErro = error;
-      console.log(`❌ Erro na tentativa ${tentativa}:`, error);
+      console.log(`Erro na automação da tentativa ${tentativa}:`, error);
 
-      await browser?.close().catch(() => null);
+      if (browser) {
+        await browser.close().catch(() => null);
+      }
 
-      const podeTentarNovamente =
-        tentativa < maxTentativas && erroEhTransitorio(error);
-
-      if (!podeTentarNovamente) {
-        console.log("⛔ Erro definitivo ou limite de tentativas atingido.");
+      if (tentativa >= maxTentativas || !erroEhTransitorio(error)) {
         break;
       }
 
-      console.log("🔁 Erro transitório detectado. Tentando novamente...");
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      await new Promise((resolve) => setTimeout(resolve, 1200));
     }
   }
 
+  const mensagem = String(
+    ultimoErro instanceof Error ? ultimoErro.message : ultimoErro || "Erro na automação."
+  );
+
   return {
     success: false,
-    message:
-      ultimoErro instanceof Error
-        ? ultimoErro.message
-        : "Erro ao emitir nota automaticamente após múltiplas tentativas",
+    message: mensagem,
     pdfUrl: null,
     xmlUrl: null,
     nfseKey: null,
     pdfBase64: null,
     xmlBase64: null,
   };
+}
+
+export async function POST(request) {
+  try {
+    const body = await request.json().catch(() => null);
+
+    const input = {
+      cnpjEmpresa: limparDocumento(body?.cnpjEmpresa),
+      senhaEmpresa: String(body?.senhaEmpresa || "").trim(),
+      competencyDate: String(body?.competencyDate || "").trim(),
+      tomadorDocumento: limparDocumento(body?.tomadorDocumento),
+      taxCode: String(body?.taxCode || "").trim(),
+      serviceCity: String(body?.serviceCity || "").trim(),
+      serviceValue: body?.serviceValue,
+      serviceDescription: String(body?.serviceDescription || "").trim(),
+      cancelKey: String(body?.cancelKey || "").trim() || null,
+    };
+
+    if (
+      !input.cnpjEmpresa ||
+      !input.senhaEmpresa ||
+      !input.competencyDate ||
+      !input.tomadorDocumento ||
+      !input.taxCode ||
+      !input.serviceCity ||
+      input.serviceValue === undefined ||
+      input.serviceValue === null ||
+      !input.serviceDescription
+    ) {
+      return Response.json(
+        {
+          success: false,
+          message: "Dados obrigatórios não enviados para o worker.",
+        },
+        { status: 400 }
+      );
+    }
+
+    const resultado = await emitirNfseViaAutomacao(input);
+
+    return Response.json(resultado, {
+      status: resultado?.success ? 200 : 500,
+    });
+  } catch (error) {
+    return Response.json(
+      {
+        success: false,
+        message: String(error?.message || "Erro inesperado no worker."),
+        pdfUrl: null,
+        xmlUrl: null,
+        nfseKey: null,
+        pdfBase64: null,
+        xmlBase64: null,
+      },
+      { status: 500 }
+    );
+  }
 }
