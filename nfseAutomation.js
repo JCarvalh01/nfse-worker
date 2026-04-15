@@ -1186,6 +1186,24 @@ async function emitirNotaNaTelaFinal(page) {
   await botaoFinal.click({ timeout: TIMEOUT_LONGO, force: true });
 
   console.log("Clique realizado no botão final Emitir NFS-e.");
+
+  const apareceuAlgo = await esperarQualquerUm(
+    page,
+    [
+      'text="Baixar DANFSe"',
+      'text="Baixar XML"',
+      'text="Visualizar NFS-e"',
+      'text="NFS-e emitidas"',
+      'text="A NFS-e foi gerada com sucesso"',
+      'text="Processando"',
+      'text="Aguarde"',
+    ],
+    TIMEOUT_LONGO
+  );
+
+  if (!apareceuAlgo) {
+    throw new Error("Após clicar em Emitir NFS-e, a tela não apresentou resposta.");
+  }
 }
 
 async function esperarConclusaoEmissao(page) {
@@ -1195,68 +1213,55 @@ async function esperarConclusaoEmissao(page) {
     const sucesso = await esperarQualquerUm(
       page,
       [
-        'text="NFS-e emitida com sucesso"',
-        'text="emitida com sucesso"',
-        'text="Baixar XML"',
         'text="Baixar DANFSe"',
+        'text="Baixar XML"',
         'text="Visualizar NFS-e"',
-        'text="Número da NFS-e"',
-        'text="Chave de acesso"',
+        'text="NFS-e emitidas"',
+        'text="A NFS-e foi gerada com sucesso"',
       ],
-      2500
+      3000
     );
 
     if (sucesso) {
-      await page.waitForTimeout(1500);
+      console.log("Confirmação de emissão encontrada:", sucesso);
       return;
     }
 
-    const erroTela = await esperarQualquerUm(
+    const mensagemErro = await esperarQualquerUm(
       page,
       [
         'text="Erro"',
         'text="Não foi possível"',
         'text="Tente novamente"',
         'text="Falha"',
-        'text="Rejeição"',
       ],
       1200
     );
 
-    if (erroTela) {
-      const texto = await page.locator("body").innerText().catch(() => "");
-      throw new Error(texto || "A emissão não foi confirmada na tela final.");
+    if (mensagemErro) {
+      console.log("Mensagem de erro detectada durante conclusão:", mensagemErro);
     }
 
-    await page.waitForTimeout(1200);
+    await page.waitForTimeout(800);
   }
 
   throw new Error("A emissão não foi confirmada na tela final.");
 }
 
 async function capturarLinksResultado(page) {
-  const anchors = page.locator("a[href]");
-  const total = await anchors.count().catch(() => 0);
+  const pdfUrl =
+    (await page
+      .locator('a:has-text("Baixar DANFSe")')
+      .first()
+      .getAttribute("href")
+      .catch(() => null)) || null;
 
-  let pdfUrl = null;
-  let xmlUrl = null;
-
-  for (let i = 0; i < total; i++) {
-    const item = anchors.nth(i);
-    const texto = normalizarTexto(await item.textContent().catch(() => ""));
-    const href = await item.getAttribute("href").catch(() => null);
-    const url = normalizarUrlArquivo(href);
-
-    if (!url) continue;
-
-    if (!pdfUrl && (texto.includes("danfse") || texto.includes("pdf"))) {
-      pdfUrl = url;
-    }
-
-    if (!xmlUrl && texto.includes("xml")) {
-      xmlUrl = url;
-    }
-  }
+  const xmlUrl =
+    (await page
+      .locator('a:has-text("Baixar XML")')
+      .first()
+      .getAttribute("href")
+      .catch(() => null)) || null;
 
   return { pdfUrl, xmlUrl };
 }
@@ -1283,6 +1288,11 @@ async function capturarChaveOuNumeroNfse(page) {
 
     if (matchNumero?.[1]) {
       return matchNumero[1].trim();
+    }
+
+    const match44 = texto.match(/\b\d{44}\b/);
+    if (match44?.[0]) {
+      return match44[0].trim();
     }
 
     await page.waitForTimeout(700);
@@ -1428,11 +1438,13 @@ export async function emitirNfseViaAutomacao(input) {
       page.setDefaultNavigationTimeout(TIMEOUT_MUITO_LONGO);
 
       const resultado = await aguardarComTentativas(
-        async () => await executarFluxoCompleto(page, input),
+        () => executarFluxoCompleto(page, input),
         1,
         0,
-        "fluxo principal da emissão"
+        "fluxo completo da automação"
       );
+
+      console.log("✅ Resultado da automação:", resultado);
 
       await context.close().catch(() => null);
       await browser.close().catch(() => null);
@@ -1440,27 +1452,29 @@ export async function emitirNfseViaAutomacao(input) {
       return resultado;
     } catch (error) {
       ultimoErro = error;
-      console.log(`Erro na automação da tentativa ${tentativa}:`, error);
+      console.log(`❌ Erro na tentativa ${tentativa}:`, error);
 
-      if (browser) {
-        await browser.close().catch(() => null);
-      }
+      await browser?.close().catch(() => null);
 
-      if (tentativa >= maxTentativas || !erroEhTransitorio(error)) {
+      const podeTentarNovamente =
+        tentativa < maxTentativas && erroEhTransitorio(error);
+
+      if (!podeTentarNovamente) {
+        console.log("⛔ Erro definitivo ou limite de tentativas atingido.");
         break;
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 1200));
+      console.log("🔁 Erro transitório detectado. Tentando novamente...");
+      await new Promise((resolve) => setTimeout(resolve, 2000));
     }
   }
 
-  const mensagem = String(
-    ultimoErro instanceof Error ? ultimoErro.message : ultimoErro || "Erro na automação."
-  );
-
   return {
     success: false,
-    message: mensagem,
+    message:
+      ultimoErro instanceof Error
+        ? ultimoErro.message
+        : "Erro ao emitir nota automaticamente após múltiplas tentativas",
     pdfUrl: null,
     xmlUrl: null,
     nfseKey: null,
@@ -1500,6 +1514,11 @@ export async function POST(request) {
         {
           success: false,
           message: "Dados obrigatórios não enviados para o worker.",
+          pdfUrl: null,
+          xmlUrl: null,
+          nfseKey: null,
+          pdfBase64: null,
+          xmlBase64: null,
         },
         { status: 400 }
       );
@@ -1514,7 +1533,10 @@ export async function POST(request) {
     return Response.json(
       {
         success: false,
-        message: String(error?.message || "Erro inesperado no worker."),
+        message:
+          error instanceof Error
+            ? error.message
+            : "Erro inesperado no worker.",
         pdfUrl: null,
         xmlUrl: null,
         nfseKey: null,

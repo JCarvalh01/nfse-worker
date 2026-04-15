@@ -5,34 +5,62 @@ const app = express();
 
 app.use(express.json({ limit: "10mb" }));
 
+const fila = [];
+let processando = false;
+
+async function processarFila() {
+  if (processando) return;
+  processando = true;
+
+  while (fila.length > 0) {
+    const job = fila.shift();
+
+    try {
+      console.log("Nova requisição recebida no worker.");
+      console.log(job.input);
+
+      const resultado = await emitirNfseViaAutomacao(job.input);
+      job.resolve(resultado);
+    } catch (error) {
+      console.error("Erro no worker:", error);
+
+      job.reject(
+        error instanceof Error ? error.message : "Erro interno no worker."
+      );
+    }
+  }
+
+  processando = false;
+}
+
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
-    message: "NFSe Worker online"
+    message: "NFSe Worker online",
   });
 });
 
 app.post("/emitir", async (req, res) => {
-  try {
-    const input = req.body;
+  const input = req.body;
 
-    console.log("Nova requisição recebida no worker.");
-    console.log(input);
-
-    const resultado = await emitirNfseViaAutomacao(input);
-
-    return res.json(resultado);
-  } catch (error) {
-    console.error("Erro no worker:", error);
-
-    return res.status(500).json({
-      success: false,
-      message:
-        error instanceof Error
-          ? error.message
-          : "Erro interno no worker."
+  return new Promise((resolveResposta) => {
+    fila.push({
+      input,
+      resolve: (resultado) => {
+        res.json(resultado);
+        resolveResposta();
+      },
+      reject: (mensagemErro) => {
+        res.status(500).json({
+          success: false,
+          message: mensagemErro,
+        });
+        resolveResposta();
+      },
     });
-  }
+
+    processarFila();
+  });
 });
 
 const PORT = process.env.PORT || 3001;
