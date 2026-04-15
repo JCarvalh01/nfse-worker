@@ -6,31 +6,33 @@ const app = express();
 app.use(express.json({ limit: "10mb" }));
 
 const fila = [];
-let processando = false;
+let emExecucao = 0;
+const MAX_CONCORRENCIA = 2;
 
-async function processarFila() {
-  if (processando) return;
-  processando = true;
-
-  while (fila.length > 0) {
+function processarFila() {
+  while (emExecucao < MAX_CONCORRENCIA && fila.length > 0) {
     const job = fila.shift();
+    emExecucao += 1;
 
-    try {
-      console.log("Nova requisição recebida no worker.");
-      console.log(job.input);
+    (async () => {
+      try {
+        console.log("Nova requisição recebida no worker.");
+        console.log(job.input);
 
-      const resultado = await emitirNfseViaAutomacao(job.input);
-      job.resolve(resultado);
-    } catch (error) {
-      console.error("Erro no worker:", error);
+        const resultado = await emitirNfseViaAutomacao(job.input);
+        job.resolve(resultado);
+      } catch (error) {
+        console.error("Erro no worker:", error);
 
-      job.reject(
-        error instanceof Error ? error.message : "Erro interno no worker."
-      );
-    }
+        job.reject(
+          error instanceof Error ? error.message : "Erro interno no worker."
+        );
+      } finally {
+        emExecucao -= 1;
+        processarFila();
+      }
+    })();
   }
-
-  processando = false;
 }
 
 app.get("/", (_req, res) => {
