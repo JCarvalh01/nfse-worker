@@ -560,7 +560,7 @@ async function preencherDocumentoTomador(page, documentoTomador) {
     "Documento do tomador"
   );
 
-  await page.waitForTimeout(120);
+  await page.waitForTimeout(400);
 
   await clicarComFallback(
     page,
@@ -592,7 +592,7 @@ async function preencherDocumentoTomador(page, documentoTomador) {
     throw new Error("A pesquisa do tomador não retornou para avançar no fluxo.");
   }
 
-  await page.waitForTimeout(120);
+  await page.waitForTimeout(500);
 }
 
 async function preencherEtapaPessoas(page, input) {
@@ -644,14 +644,14 @@ async function selecionarMunicipioPrestacao(page, municipioCompleto) {
   const inputBusca = await abrirSelect2ECapturarBusca(page, campoMunicipio, "Município");
   await inputBusca.click({ force: true }).catch(() => null);
   await inputBusca.fill("").catch(() => null);
-  await inputBusca.type(nomeMunicipio, { delay: 22 });
-  await page.waitForTimeout(420);
+  await inputBusca.type(nomeMunicipio, { delay: 45 });
+  await page.waitForTimeout(1200);
 
   const opcoes = page.locator("li.select2-results__option");
   let total = await opcoes.count().catch(() => 0);
 
   if (!total) {
-    await page.waitForTimeout(280);
+    await page.waitForTimeout(900);
     total = await opcoes.count().catch(() => 0);
   }
 
@@ -713,7 +713,7 @@ async function selecionarMunicipioPrestacao(page, municipioCompleto) {
 
   await melhorOpcao.scrollIntoViewIfNeeded().catch(() => null);
   await melhorOpcao.click({ force: true, timeout: TIMEOUT_MEDIO });
-  await page.waitForTimeout(220);
+  await page.waitForTimeout(700);
 }
 
 async function localizarCampoCodigoTributacao(page) {
@@ -825,7 +825,7 @@ async function marcarOpcaoNao(page) {
 
       await loc.scrollIntoViewIfNeeded().catch(() => null);
       await loc.click({ force: true, timeout: TIMEOUT_MEDIO });
-      await page.waitForTimeout(120);
+      await page.waitForTimeout(400);
       return;
     } catch {}
   }
@@ -872,13 +872,13 @@ async function preencherEtapaServico(page, input) {
   await page.waitForTimeout(120);
 
   await selecionarMunicipioPrestacao(page, input.serviceCity);
-  await page.waitForTimeout(120);
+  await page.waitForTimeout(450);
 
   await selecionarCodigoTributacao(page, input.taxCode);
   await page.waitForTimeout(180);
 
   await marcarOpcaoNao(page);
-  await page.waitForTimeout(120);
+  await page.waitForTimeout(400);
 
   await preencherDescricaoServico(page, input.serviceDescription);
   await page.waitForTimeout(120);
