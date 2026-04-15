@@ -6,7 +6,7 @@ const TIMEOUT_CURTO = 4000;
 const TIMEOUT_MEDIO = 8000;
 const TIMEOUT_LONGO = 18000;
 const TIMEOUT_MUITO_LONGO = 30000;
-const TIMEOUT_EMISSAO_FINAL = 45000;
+const TIMEOUT_EMISSAO_FINAL = 30000;
 
 const STORAGE_BUCKET = "nfse-files";
 const NFSE_PORTAL_BASE_URL = "https://www.nfse.gov.br";
@@ -645,13 +645,13 @@ async function selecionarMunicipioPrestacao(page, municipioCompleto) {
   await inputBusca.click({ force: true }).catch(() => null);
   await inputBusca.fill("").catch(() => null);
   await inputBusca.type(nomeMunicipio, { delay: 45 });
-  await page.waitForTimeout(1200);
+  await page.waitForTimeout(700);
 
   const opcoes = page.locator("li.select2-results__option");
   let total = await opcoes.count().catch(() => 0);
 
   if (!total) {
-    await page.waitForTimeout(900);
+    await page.waitForTimeout(500);
     total = await opcoes.count().catch(() => 0);
   }
 
@@ -713,7 +713,7 @@ async function selecionarMunicipioPrestacao(page, municipioCompleto) {
 
   await melhorOpcao.scrollIntoViewIfNeeded().catch(() => null);
   await melhorOpcao.click({ force: true, timeout: TIMEOUT_MEDIO });
-  await page.waitForTimeout(700);
+  await page.waitForTimeout(350);
 }
 
 async function localizarCampoCodigoTributacao(page) {
