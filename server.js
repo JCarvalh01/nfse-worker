@@ -69,6 +69,18 @@ async function testarConexaoSupabase() {
       );
     }
 
+    console.log("🧪 Testando acesso HTTP direto ao Supabase...");
+
+    const testeHttp = await fetch(`${SUPABASE_URL}/rest/v1/`, {
+      method: "GET",
+      headers: {
+        apikey: SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      },
+    });
+
+    console.log("HTTP STATUS SUPABASE:", testeHttp.status);
+
     const { data, error } = await supabaseAdmin
       .from("invoice_jobs")
       .select("id")
@@ -85,7 +97,11 @@ async function testarConexaoSupabase() {
 
     return true;
   } catch (error) {
-    console.error("❌ Falha ao testar conexão com Supabase:", error);
+    console.error("❌ Falha ao testar conexão com Supabase:");
+    console.error("name:", error?.name);
+    console.error("message:", error?.message);
+    console.error("cause:", error?.cause);
+    console.error("stack:", error?.stack);
     return false;
   }
 }
