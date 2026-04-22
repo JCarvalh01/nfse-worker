@@ -3,10 +3,10 @@ import { createClient } from "@supabase/supabase-js";
 const { chromium } = await import("playwright");
 
 const TIMEOUT_CURTO = 4000;
-const TIMEOUT_MEDIO = 8000;
-const TIMEOUT_LONGO = 18000;
-const TIMEOUT_MUITO_LONGO = 30000;
-const TIMEOUT_EMISSAO_FINAL = 30000;
+const TIMEOUT_MEDIO = 10000;
+const TIMEOUT_LONGO = 22000;
+const TIMEOUT_MUITO_LONGO = 45000;
+const TIMEOUT_EMISSAO_FINAL = 120000;
 
 const STORAGE_BUCKET = "nfse-files";
 const NFSE_PORTAL_BASE_URL = "https://www.nfse.gov.br";
@@ -122,6 +122,8 @@ function erroEhTransitorio(erro) {
     "nenhuma opção apareceu para o código de tributação",
     "não encontrei botão",
     "a emissão não foi confirmada na tela final",
+    "a tela final de prévia da emissão não foi carregada",
+    "após clicar em emitir nfs-e, a tela não apresentou resposta",
   ];
 
   return errosTransitorios.some((trecho) => msg.includes(trecho));
@@ -142,15 +144,34 @@ function normalizarUrlArquivo(valor) {
   return null;
 }
 
-async function esperarRedeEstabilizar(page, atraso = 250) {
+async function uploadBufferToStorage(buffer, destinationPath, contentType) {
+  const { error } = await supabaseAdmin.storage
+    .from(STORAGE_BUCKET)
+    .upload(destinationPath, buffer, {
+      contentType,
+      upsert: true,
+    });
+
+  if (error) {
+    throw new Error(`Erro ao enviar arquivo para o Storage: ${error.message}`);
+  }
+
+  const { data } = supabaseAdmin.storage
+    .from(STORAGE_BUCKET)
+    .getPublicUrl(destinationPath);
+
+  return data?.publicUrl || null;
+}
+
+async function esperarRedeEstabilizar(page, atraso = 300) {
   await page.waitForLoadState("domcontentloaded").catch(() => null);
-  await page.waitForLoadState("networkidle", { timeout: 2500 }).catch(() => null);
+  await page.waitForLoadState("networkidle", { timeout: 3500 }).catch(() => null);
   if (atraso > 0) {
     await page.waitForTimeout(atraso);
   }
 }
 
-async function esperarPaginaPronta(page, nomeEtapa, atraso = 300) {
+async function esperarPaginaPronta(page, nomeEtapa, atraso = 350) {
   console.log(`Aguardando estabilização da etapa: ${nomeEtapa}`);
   await esperarRedeEstabilizar(page, atraso);
 }
@@ -158,7 +179,7 @@ async function esperarPaginaPronta(page, nomeEtapa, atraso = 300) {
 async function aguardarComTentativas(
   fn,
   tentativas = 2,
-  esperaMs = 400,
+  esperaMs = 700,
   nome = "operação"
 ) {
   let ultimoErro = null;
@@ -205,14 +226,14 @@ async function preencherCampoComFallback(page, selectors, valor, nomeCampo) {
       await locator.waitFor({ state: "visible", timeout: TIMEOUT_LONGO });
       await locator.scrollIntoViewIfNeeded().catch(() => null);
       await locator.click({ timeout: TIMEOUT_MEDIO });
-      await page.waitForTimeout(60);
+      await page.waitForTimeout(70);
 
       await locator.press("Control+A").catch(() => null);
       await locator.press("Meta+A").catch(() => null);
       await locator.fill("").catch(() => null);
-      await page.waitForTimeout(60);
+      await page.waitForTimeout(70);
 
-      await locator.type(valor, { delay: 18 });
+      await locator.type(valor, { delay: 22 });
 
       const valorAtual = await locator.inputValue().catch(() => "");
       console.log(`Campo ${nomeCampo} preenchido com seletor ${selector}:`, valorAtual);
@@ -237,7 +258,7 @@ async function clicarComFallback(page, selectors, nome) {
 
       await locator.waitFor({ state: "visible", timeout: TIMEOUT_LONGO });
       await locator.scrollIntoViewIfNeeded().catch(() => null);
-      await page.waitForTimeout(60);
+      await page.waitForTimeout(70);
       await locator.click({ timeout: TIMEOUT_MEDIO, force: true });
       console.log(`Clique realizado em ${nome} com seletor: ${selector}`);
       return;
@@ -284,7 +305,7 @@ async function esperarQualquerUm(page, selectors, timeout = TIMEOUT_MEDIO) {
       } catch {}
     }
 
-    await page.waitForTimeout(160);
+    await page.waitForTimeout(180);
   }
 
   return null;
@@ -306,9 +327,9 @@ async function obterInputSelect2Visivel(page) {
 async function abrirSelect2ECapturarBusca(page, campo, nomeCampo) {
   for (let tentativa = 1; tentativa <= 4; tentativa++) {
     await campo.scrollIntoViewIfNeeded().catch(() => null);
-    await page.waitForTimeout(60);
+    await page.waitForTimeout(70);
     await campo.click({ force: true, timeout: TIMEOUT_MEDIO }).catch(() => null);
-    await page.waitForTimeout(180);
+    await page.waitForTimeout(220);
 
     const inputBusca = await obterInputSelect2Visivel(page);
     if (inputBusca) {
@@ -317,7 +338,7 @@ async function abrirSelect2ECapturarBusca(page, campo, nomeCampo) {
     }
 
     await page.keyboard.press("Escape").catch(() => null);
-    await page.waitForTimeout(120);
+    await page.waitForTimeout(140);
   }
 
   throw new Error(`Não foi possível abrir o campo Select2 de ${nomeCampo}.`);
@@ -338,7 +359,7 @@ async function fecharPossiveisModaisOuAvisos(page) {
   ).catch(() => null);
 
   await page.keyboard.press("Escape").catch(() => null);
-  await page.waitForTimeout(80);
+  await page.waitForTimeout(100);
 }
 
 async function fazerLogin(page, cnpj, senha) {
@@ -349,7 +370,7 @@ async function fazerLogin(page, cnpj, senha) {
     timeout: TIMEOUT_MUITO_LONGO,
   });
 
-  await esperarPaginaPronta(page, "login", 250);
+  await esperarPaginaPronta(page, "login", 300);
   await fecharPossiveisModaisOuAvisos(page);
 
   await preencherCampoComFallback(
@@ -383,7 +404,7 @@ async function fazerLogin(page, cnpj, senha) {
     "botão Entrar"
   );
 
-  await page.waitForTimeout(700);
+  await page.waitForTimeout(900);
 
   const erroLogin = await page
     .locator('text="Usuário e/ou senha inválidos"')
@@ -406,7 +427,7 @@ async function abrirTelaPessoas(page) {
     timeout: TIMEOUT_MUITO_LONGO,
   });
 
-  await esperarPaginaPronta(page, "Pessoas", 280);
+  await esperarPaginaPronta(page, "Pessoas", 320);
   await fecharPossiveisModaisOuAvisos(page);
 
   const marcadores = [
@@ -446,12 +467,12 @@ async function preencherDataCompetencia(page, dataIso) {
       await locator.waitFor({ state: "visible", timeout: TIMEOUT_LONGO });
       await locator.scrollIntoViewIfNeeded().catch(() => null);
       await locator.click({ timeout: TIMEOUT_MEDIO });
-      await page.waitForTimeout(60);
+      await page.waitForTimeout(70);
       await locator.press("Control+A").catch(() => null);
       await locator.press("Meta+A").catch(() => null);
       await locator.fill("");
-      await page.waitForTimeout(60);
-      await locator.type(dataPtBr, { delay: 18 });
+      await page.waitForTimeout(70);
+      await locator.type(dataPtBr, { delay: 22 });
 
       const valorAtual = await locator.inputValue().catch(() => "");
       if (valorAtual.includes("/")) {
@@ -475,7 +496,7 @@ async function clicarEspacoEmBrancoParaCarregarEmitente(page) {
   for (const tentar of tentativas) {
     try {
       await tentar();
-      await page.waitForTimeout(180);
+      await page.waitForTimeout(220);
       return;
     } catch {}
   }
@@ -492,7 +513,7 @@ async function esperarEmitentePreenchido(page, cnpj) {
       await page
         .locator(selector)
         .first()
-        .waitFor({ state: "visible", timeout: TIMEOUT_CURTO });
+        .waitFor({ state: "visible", timeout: TIMEOUT_MEDIO });
       return;
     } catch {}
   }
@@ -521,7 +542,7 @@ async function selecionarBrasilTomador(page) {
         await page.locator(`#${htmlFor}`).check({ force: true }).catch(() => null);
       }
 
-      await page.waitForTimeout(120);
+      await page.waitForTimeout(140);
       return;
     } catch {}
   }
@@ -537,7 +558,7 @@ async function selecionarBrasilTomador(page) {
 
   if (radioBrasil) {
     await radioBrasil.check({ force: true }).catch(() => null);
-    await page.waitForTimeout(120);
+    await page.waitForTimeout(140);
     return;
   }
 
@@ -600,7 +621,7 @@ async function preencherEtapaPessoas(page, input) {
   const cnpjEmitente = limparDocumento(input.cnpjEmpresa);
 
   await preencherDataCompetencia(page, input.competencyDate);
-  await page.waitForTimeout(120);
+  await page.waitForTimeout(140);
 
   await clicarEspacoEmBrancoParaCarregarEmitente(page);
   await esperarEmitentePreenchido(page, cnpjEmitente);
@@ -614,7 +635,7 @@ async function preencherEtapaPessoas(page, input) {
     "botão Avançar da etapa Pessoas"
   );
 
-  await esperarPaginaPronta(page, "transição Pessoas > Serviço", 220);
+  await esperarPaginaPronta(page, "transição Pessoas > Serviço", 260);
 }
 
 async function selecionarMunicipioPrestacao(page, municipioCompleto) {
@@ -645,13 +666,14 @@ async function selecionarMunicipioPrestacao(page, municipioCompleto) {
   await inputBusca.click({ force: true }).catch(() => null);
   await inputBusca.fill("").catch(() => null);
   await inputBusca.type(nomeMunicipio, { delay: 45 });
-  await page.waitForTimeout(700);
+
+  await page.waitForTimeout(900);
 
   const opcoes = page.locator("li.select2-results__option");
   let total = await opcoes.count().catch(() => 0);
 
   if (!total) {
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(650);
     total = await opcoes.count().catch(() => 0);
   }
 
@@ -713,7 +735,7 @@ async function selecionarMunicipioPrestacao(page, municipioCompleto) {
 
   await melhorOpcao.scrollIntoViewIfNeeded().catch(() => null);
   await melhorOpcao.click({ force: true, timeout: TIMEOUT_MEDIO });
-  await page.waitForTimeout(350);
+  await page.waitForTimeout(420);
 }
 
 async function localizarCampoCodigoTributacao(page) {
@@ -746,13 +768,14 @@ async function selecionarCodigoTributacao(page, taxCode) {
   await inputBusca.click({ force: true }).catch(() => null);
   await inputBusca.fill("").catch(() => null);
   await inputBusca.type(codigoOriginal, { delay: 22 });
-  await page.waitForTimeout(420);
+
+  await page.waitForTimeout(650);
 
   const opcoes = page.locator("li.select2-results__option");
   let total = await opcoes.count().catch(() => 0);
 
   if (!total) {
-    await page.waitForTimeout(260);
+    await page.waitForTimeout(420);
     total = await opcoes.count().catch(() => 0);
   }
 
@@ -792,7 +815,7 @@ async function selecionarCodigoTributacao(page, taxCode) {
   await melhorOpcao.scrollIntoViewIfNeeded().catch(() => null);
   await melhorOpcao.click({ force: true, timeout: TIMEOUT_MEDIO });
 
-  await page.waitForTimeout(320);
+  await page.waitForTimeout(420);
 
   await esperarQualquerUm(
     page,
@@ -867,21 +890,21 @@ async function esperarTelaServico(page) {
 }
 
 async function preencherEtapaServico(page, input) {
-  await esperarPaginaPronta(page, "Serviço", 220);
+  await esperarPaginaPronta(page, "Serviço", 260);
   await esperarTelaServico(page);
-  await page.waitForTimeout(120);
+  await page.waitForTimeout(140);
 
   await selecionarMunicipioPrestacao(page, input.serviceCity);
-  await page.waitForTimeout(450);
+  await page.waitForTimeout(480);
 
   await selecionarCodigoTributacao(page, input.taxCode);
-  await page.waitForTimeout(180);
+  await page.waitForTimeout(220);
 
   await marcarOpcaoNao(page);
   await page.waitForTimeout(400);
 
   await preencherDescricaoServico(page, input.serviceDescription);
-  await page.waitForTimeout(120);
+  await page.waitForTimeout(140);
 
   await clicarComFallback(
     page,
@@ -889,11 +912,11 @@ async function preencherEtapaServico(page, input) {
     "botão Avançar da etapa Serviço"
   );
 
-  await esperarPaginaPronta(page, "transição Serviço > Valores", 220);
+  await esperarPaginaPronta(page, "transição Serviço > Valores", 260);
 }
 
 async function preencherEtapaValores(page, input) {
-  await esperarPaginaPronta(page, "Valores", 180);
+  await esperarPaginaPronta(page, "Valores", 220);
 
   const valorDigitacao = formatarValorParaDigitacaoNoPortal(input.serviceValue);
   console.log("Valor original recebido:", input.serviceValue);
@@ -922,7 +945,7 @@ async function preencherEtapaValores(page, input) {
     "opção não reter"
   );
 
-  await page.waitForTimeout(120);
+  await page.waitForTimeout(140);
 
   await clicarComFallback(
     page,
@@ -946,7 +969,7 @@ async function preencherEtapaValores(page, input) {
     throw new Error("A tela final de prévia da emissão não foi carregada.");
   }
 
-  await esperarPaginaPronta(page, "Prévia da emissão", 220);
+  await esperarPaginaPronta(page, "Prévia da emissão", 260);
 }
 
 async function capturarDownloadEmMemoria(download, nomeArquivo) {
@@ -971,31 +994,12 @@ async function capturarDownloadEmMemoria(download, nomeArquivo) {
   return buffer;
 }
 
-async function uploadBufferToStorage(buffer, destinationPath, contentType) {
-  const { error } = await supabaseAdmin.storage
-    .from(STORAGE_BUCKET)
-    .upload(destinationPath, buffer, {
-      contentType,
-      upsert: true,
-    });
-
-  if (error) {
-    throw new Error(`Erro ao enviar arquivo para o Storage: ${error.message}`);
-  }
-
-  const { data } = supabaseAdmin.storage
-    .from(STORAGE_BUCKET)
-    .getPublicUrl(destinationPath);
-
-  return data?.publicUrl || null;
-}
-
 async function baixarConteudoPorUrl(context, url, nomeArquivo) {
   const urlFinal = normalizarUrlArquivo(url);
   if (!urlFinal) return null;
 
   const response = await context.request.get(urlFinal, {
-    timeout: TIMEOUT_MEDIO,
+    timeout: 15000,
   }).catch(() => null);
 
   if (!response || !response.ok()) {
@@ -1027,16 +1031,16 @@ async function baixarArquivoPorBotao(page, selectors, nomeLogico, nomeArquivo) {
       if (!visivel) continue;
 
       await botao.scrollIntoViewIfNeeded().catch(() => null);
-      await page.waitForTimeout(120);
+      await page.waitForTimeout(140);
 
       const hrefAntesClique = await botao.getAttribute("href").catch(() => null);
 
       const downloadPromise = page
-        .waitForEvent("download", { timeout: 4500 })
+        .waitForEvent("download", { timeout: 15000 })
         .catch(() => null);
 
       const popupPromise = page
-        .waitForEvent("popup", { timeout: 4500 })
+        .waitForEvent("popup", { timeout: 15000 })
         .catch(() => null);
 
       await botao.click({ force: true });
@@ -1054,10 +1058,10 @@ async function baixarArquivoPorBotao(page, selectors, nomeLogico, nomeArquivo) {
       popup = await popupPromise;
       if (popup) {
         await popup.waitForLoadState("domcontentloaded").catch(() => null);
-        await popup.waitForTimeout(380);
+        await popup.waitForTimeout(550);
 
         const popupDownload = await popup
-          .waitForEvent("download", { timeout: 4500 })
+          .waitForEvent("download", { timeout: 15000 })
           .catch(() => null);
 
         if (popupDownload) {
@@ -1113,6 +1117,7 @@ async function baixarArquivoPorBotao(page, selectors, nomeLogico, nomeArquivo) {
         return viaHrefDireto;
       }
     } catch (error) {
+      console.log(`Falha ao baixar ${nomeLogico}:`, error);
       if (popup) {
         await popup.close().catch(() => null);
       }
@@ -1147,7 +1152,7 @@ async function localizarBotaoFinalEmitir(page) {
 }
 
 async function emitirNotaNaTelaFinal(page) {
-  await esperarPaginaPronta(page, "Tela final antes da emissão", 220);
+  await esperarPaginaPronta(page, "Tela final antes da emissão", 260);
 
   const marcador = await esperarQualquerUm(
     page,
@@ -1168,7 +1173,7 @@ async function emitirNotaNaTelaFinal(page) {
 
   await botaoFinal.scrollIntoViewIfNeeded().catch(() => null);
   await botaoFinal.waitFor({ state: "visible", timeout: TIMEOUT_LONGO });
-  await page.waitForTimeout(220);
+  await page.waitForTimeout(260);
 
   await botaoFinal.click({ timeout: TIMEOUT_LONGO, force: true });
 
@@ -1204,14 +1209,29 @@ async function esperarConclusaoEmissao(page) {
         'text="NFS-e emitidas"',
         'text="A NFS-e foi gerada com sucesso"',
       ],
-      1800
+      2500
     );
 
     if (sucesso) {
       return;
     }
 
-    await page.waitForTimeout(280);
+    const erroTexto = await esperarQualquerUm(
+      page,
+      [
+        'text="Erro"',
+        'text="Não foi possível"',
+        'text="Falha"',
+        'text="Tente novamente"',
+      ],
+      600
+    );
+
+    if (erroTexto) {
+      console.log("Mensagem temporária detectada durante conclusão:", erroTexto);
+    }
+
+    await page.waitForTimeout(500);
   }
 
   throw new Error("A emissão não foi confirmada na tela final.");
@@ -1238,7 +1258,7 @@ async function capturarLinksResultado(page) {
 async function capturarChaveOuNumeroNfse(page) {
   const inicio = Date.now();
 
-  while (Date.now() - inicio < 6000) {
+  while (Date.now() - inicio < 12000) {
     const textoTela = await page.locator("body").innerText().catch(() => "");
     const texto = String(textoTela || "");
 
@@ -1264,7 +1284,7 @@ async function capturarChaveOuNumeroNfse(page) {
       return match44[0].trim();
     }
 
-    await page.waitForTimeout(220);
+    await page.waitForTimeout(260);
   }
 
   return null;
@@ -1362,7 +1382,7 @@ async function criarContexto(browser) {
 
 export async function emitirNfseViaAutomacao(input) {
   let ultimoErro = null;
-  const maxTentativas = 1;
+  const maxTentativas = 2;
 
   for (let tentativa = 1; tentativa <= maxTentativas; tentativa++) {
     let browser = null;
@@ -1424,7 +1444,7 @@ export async function emitirNfseViaAutomacao(input) {
         break;
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      await new Promise((resolve) => setTimeout(resolve, 800));
     }
   }
 
