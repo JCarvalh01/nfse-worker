@@ -11,34 +11,6 @@ const SUPABASE_SERVICE_ROLE_KEY = String(
   process.env.SUPABASE_SERVICE_ROLE_KEY || ""
 ).trim();
 
-function mascararValor(valor = "") {
-  if (!valor) return "[VAZIO]";
-  if (valor.length <= 10) return `${valor.slice(0, 2)}***${valor.slice(-2)}`;
-  return `${valor.slice(0, 6)}...${valor.slice(-6)}`;
-}
-
-console.log("SUPABASE URL:", SUPABASE_URL || "[VAZIO]");
-console.log(
-  "SUPABASE SERVICE ROLE PRESENTE:",
-  Boolean(SUPABASE_SERVICE_ROLE_KEY)
-);
-console.log(
-  "SUPABASE SERVICE ROLE MASK:",
-  mascararValor(SUPABASE_SERVICE_ROLE_KEY)
-);
-console.log(
-  "SUPABASE SERVICE ROLE LENGTH:",
-  SUPABASE_SERVICE_ROLE_KEY.length
-);
-
-if (!SUPABASE_URL) {
-  console.error("❌ NEXT_PUBLIC_SUPABASE_URL não foi definida no worker.");
-}
-
-if (!SUPABASE_SERVICE_ROLE_KEY) {
-  console.error("❌ SUPABASE_SERVICE_ROLE_KEY não foi definida no worker.");
-}
-
 const supabaseAdmin = createClient(
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
@@ -46,9 +18,6 @@ const supabaseAdmin = createClient(
     auth: {
       persistSession: false,
       autoRefreshToken: false,
-    },
-    global: {
-      fetch: (...args) => fetch(...args),
     },
   }
 );
@@ -66,6 +35,12 @@ const PROCESSANDO_EM_LOOP = {
   ativo: false,
 };
 
+function mascararValor(valor = "") {
+  if (!valor) return "[VAZIO]";
+  if (valor.length <= 10) return `${valor.slice(0, 2)}***${valor.slice(-2)}`;
+  return `${valor.slice(0, 6)}...${valor.slice(-6)}`;
+}
+
 function onlyDigits(value) {
   return String(value ?? "").replace(/\D/g, "");
 }
@@ -74,14 +49,10 @@ function getStaleJobIsoDate() {
   return new Date(Date.now() - STALE_JOB_MINUTES * 60 * 1000).toISOString();
 }
 
-function descreverErroSupabase(error) {
-  if (!error) return "Erro desconhecido do Supabase.";
-
+function descreverErro(error) {
+  if (!error) return "Erro desconhecido.";
   if (typeof error === "string") return error;
-
-  if (error instanceof Error) {
-    return `${error.name}: ${error.message}`;
-  }
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
 
   try {
     return JSON.stringify(error);
@@ -108,9 +79,10 @@ async function testarConexaoSupabase() {
     }
 
     console.log(
-      "✅ Teste de conexão com Supabase OK. invoice_jobs acessível.",
+      "✅ Teste de conexão com Supabase OK.",
       Array.isArray(data) ? `Linhas consultadas: ${data.length}` : ""
     );
+
     return true;
   } catch (error) {
     console.error("❌ Falha ao testar conexão com Supabase:", error);
@@ -282,9 +254,7 @@ async function liberarJobsTravados() {
     data = resposta.data;
     error = resposta.error;
   } catch (erroConsulta) {
-    throw new Error(
-      `Erro ao buscar jobs travados: ${descreverErroSupabase(erroConsulta)}`
-    );
+    throw new Error(`Erro ao buscar jobs travados: ${descreverErro(erroConsulta)}`);
   }
 
   if (error) {
@@ -593,18 +563,26 @@ async function processarFilaAutomatica() {
   PROCESSANDO_EM_LOOP.ativo = true;
 
   try {
+    console.log("🔄 Iniciando varredura automática da fila...");
+
     await liberarJobsTravados();
 
     while (emExecucao < MAX_CONCORRENCIA) {
       const jobQueued = await buscarProximoJobQueued();
 
       if (!jobQueued) {
+        console.log("Nenhum job queued encontrado no momento.");
         break;
       }
+
+      console.log(
+        `Job queued encontrado: ${jobQueued.id} | invoice ${jobQueued.invoice_id}`
+      );
 
       const jobTravado = await travarJob(jobQueued.id);
 
       if (!jobTravado) {
+        console.log(`Não foi possível travar o job ${jobQueued.id}.`);
         continue;
       }
 
@@ -691,7 +669,9 @@ async function processarFilaAutomatica() {
 }
 
 setInterval(() => {
-  processarFilaAutomatica();
+  processarFilaAutomatica().catch((error) => {
+    console.error("Erro no setInterval da fila automática:", error);
+  });
 }, INTERVALO_FILA_LOCAL_MS);
 
 app.get("/", (_req, res) => {
@@ -742,7 +722,7 @@ app.get("/health", async (_req, res) => {
   } catch (error) {
     status.ok = false;
     status.supabaseConnection = "error";
-    status.supabaseError = descreverErroSupabase(error);
+    status.supabaseError = descreverErro(error);
     return res.status(500).json(status);
   }
 });
@@ -773,6 +753,17 @@ app.post("/emitir", async (req, res) => {
 const PORT = process.env.PORT || 3001;
 
 app.listen(PORT, async () => {
+  console.log(`SUPABASE URL: ${SUPABASE_URL || "[VAZIO]"}`);
+  console.log(
+    `SUPABASE SERVICE ROLE PRESENTE: ${Boolean(SUPABASE_SERVICE_ROLE_KEY)}`
+  );
+  console.log(
+    `SUPABASE SERVICE ROLE MASK: ${mascararValor(SUPABASE_SERVICE_ROLE_KEY)}`
+  );
+  console.log(
+    `SUPABASE SERVICE ROLE LENGTH: ${SUPABASE_SERVICE_ROLE_KEY.length}`
+  );
+
   console.log(`Worker rodando na porta ${PORT}`);
   console.log(`MAX_CONCORRENCIA: ${MAX_CONCORRENCIA}`);
   console.log(`PROCESSAR_FILA_INTERVALO_MS: ${INTERVALO_FILA_LOCAL_MS}`);
