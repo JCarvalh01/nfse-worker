@@ -6,13 +6,49 @@ const app = express();
 
 app.use(express.json({ limit: "10mb" }));
 
+const SUPABASE_URL = String(process.env.NEXT_PUBLIC_SUPABASE_URL || "").trim();
+const SUPABASE_SERVICE_ROLE_KEY = String(
+  process.env.SUPABASE_SERVICE_ROLE_KEY || ""
+).trim();
+
+function mascararValor(valor = "") {
+  if (!valor) return "[VAZIO]";
+  if (valor.length <= 10) return `${valor.slice(0, 2)}***${valor.slice(-2)}`;
+  return `${valor.slice(0, 6)}...${valor.slice(-6)}`;
+}
+
+console.log("SUPABASE URL:", SUPABASE_URL || "[VAZIO]");
+console.log(
+  "SUPABASE SERVICE ROLE PRESENTE:",
+  Boolean(SUPABASE_SERVICE_ROLE_KEY)
+);
+console.log(
+  "SUPABASE SERVICE ROLE MASK:",
+  mascararValor(SUPABASE_SERVICE_ROLE_KEY)
+);
+console.log(
+  "SUPABASE SERVICE ROLE LENGTH:",
+  SUPABASE_SERVICE_ROLE_KEY.length
+);
+
+if (!SUPABASE_URL) {
+  console.error("❌ NEXT_PUBLIC_SUPABASE_URL não foi definida no worker.");
+}
+
+if (!SUPABASE_SERVICE_ROLE_KEY) {
+  console.error("❌ SUPABASE_SERVICE_ROLE_KEY não foi definida no worker.");
+}
+
 const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
   {
     auth: {
       persistSession: false,
       autoRefreshToken: false,
+    },
+    global: {
+      fetch: (...args) => fetch(...args),
     },
   }
 );
@@ -36,6 +72,50 @@ function onlyDigits(value) {
 
 function getStaleJobIsoDate() {
   return new Date(Date.now() - STALE_JOB_MINUTES * 60 * 1000).toISOString();
+}
+
+function descreverErroSupabase(error) {
+  if (!error) return "Erro desconhecido do Supabase.";
+
+  if (typeof error === "string") return error;
+
+  if (error instanceof Error) {
+    return `${error.name}: ${error.message}`;
+  }
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+async function testarConexaoSupabase() {
+  try {
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+      throw new Error(
+        "As variáveis NEXT_PUBLIC_SUPABASE_URL e/ou SUPABASE_SERVICE_ROLE_KEY estão ausentes."
+      );
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from("invoice_jobs")
+      .select("id")
+      .limit(1);
+
+    if (error) {
+      throw new Error(`Falha no teste do Supabase: ${error.message}`);
+    }
+
+    console.log(
+      "✅ Teste de conexão com Supabase OK. invoice_jobs acessível.",
+      Array.isArray(data) ? `Linhas consultadas: ${data.length}` : ""
+    );
+    return true;
+  } catch (error) {
+    console.error("❌ Falha ao testar conexão com Supabase:", error);
+    return false;
+  }
 }
 
 function processarFilaMemoria() {
@@ -188,12 +268,24 @@ async function atualizarInvoiceParaSuccess(invoiceId, resultado) {
 async function liberarJobsTravados() {
   const staleIso = getStaleJobIsoDate();
 
-  const { data, error } = await supabaseAdmin
-    .from("invoice_jobs")
-    .select("*")
-    .eq("status", "processing")
-    .eq("job_type", "emit_nfse")
-    .lt("locked_at", staleIso);
+  let data;
+  let error;
+
+  try {
+    const resposta = await supabaseAdmin
+      .from("invoice_jobs")
+      .select("*")
+      .eq("status", "processing")
+      .eq("job_type", "emit_nfse")
+      .lt("locked_at", staleIso);
+
+    data = resposta.data;
+    error = resposta.error;
+  } catch (erroConsulta) {
+    throw new Error(
+      `Erro ao buscar jobs travados: ${descreverErroSupabase(erroConsulta)}`
+    );
+  }
 
   if (error) {
     throw new Error(`Erro ao buscar jobs travados: ${error.message}`);
@@ -610,11 +702,14 @@ app.get("/", (_req, res) => {
     intervaloFilaMs: INTERVALO_FILA_LOCAL_MS,
     emExecucao,
     filaMemoria: fila.length,
+    supabaseUrl: SUPABASE_URL || null,
+    supabaseServiceRolePresent: Boolean(SUPABASE_SERVICE_ROLE_KEY),
+    supabaseServiceRoleLength: SUPABASE_SERVICE_ROLE_KEY.length,
   });
 });
 
-app.get("/health", (_req, res) => {
-  res.json({
+app.get("/health", async (_req, res) => {
+  const status = {
     ok: true,
     worker: "online",
     emExecucao,
@@ -622,7 +717,34 @@ app.get("/health", (_req, res) => {
     concorrenciaMaxima: MAX_CONCORRENCIA,
     intervaloFilaMs: INTERVALO_FILA_LOCAL_MS,
     loopAtivo: PROCESSANDO_EM_LOOP.ativo,
-  });
+    supabaseUrl: SUPABASE_URL || null,
+    supabaseServiceRolePresent: Boolean(SUPABASE_SERVICE_ROLE_KEY),
+    supabaseServiceRoleLength: SUPABASE_SERVICE_ROLE_KEY.length,
+    supabaseConnection: "unknown",
+    supabaseError: null,
+  };
+
+  try {
+    const { error } = await supabaseAdmin
+      .from("invoice_jobs")
+      .select("id")
+      .limit(1);
+
+    if (error) {
+      status.ok = false;
+      status.supabaseConnection = "error";
+      status.supabaseError = error.message;
+      return res.status(500).json(status);
+    }
+
+    status.supabaseConnection = "ok";
+    return res.json(status);
+  } catch (error) {
+    status.ok = false;
+    status.supabaseConnection = "error";
+    status.supabaseError = descreverErroSupabase(error);
+    return res.status(500).json(status);
+  }
 });
 
 app.post("/emitir", async (req, res) => {
@@ -654,6 +776,12 @@ app.listen(PORT, async () => {
   console.log(`Worker rodando na porta ${PORT}`);
   console.log(`MAX_CONCORRENCIA: ${MAX_CONCORRENCIA}`);
   console.log(`PROCESSAR_FILA_INTERVALO_MS: ${INTERVALO_FILA_LOCAL_MS}`);
+
+  const conexaoOk = await testarConexaoSupabase();
+
+  if (!conexaoOk) {
+    console.error("❌ O worker iniciou, mas a conexão com o Supabase falhou.");
+  }
 
   try {
     await processarFilaAutomatica();
